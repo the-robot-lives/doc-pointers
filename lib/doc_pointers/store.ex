@@ -24,15 +24,34 @@ defmodule DocPointers.Store do
 
   @impl true
   def init(root) do
-    state = %{root: root, pointers: %{}, token_index: %{}}
-    state = load_pointers(state)
+    submodules = detect_submodules(root)
+
+    state = %{
+      root: root,
+      submodules: submodules,
+      pointers: %{},
+      token_index: %{},
+      store_membership: %{}
+    }
+
+    state = load_all_pointers(state)
     {:ok, state}
   end
 
   @impl true
   def handle_call({:set_root, root}, _from, state) do
-    state = %{state | root: root}
-    state = load_pointers(state)
+    submodules = detect_submodules(root)
+
+    state = %{
+      state
+      | root: root,
+        submodules: submodules,
+        pointers: %{},
+        token_index: %{},
+        store_membership: %{}
+    }
+
+    state = load_all_pointers(state)
     {:reply, :ok, state}
   end
 
@@ -48,8 +67,9 @@ defmodule DocPointers.Store do
   end
 
   def handle_call({:put, %Pointer{} = pointer}, _from, state) do
-    state = put_pointer(state, pointer)
-    save_pointers(state)
+    {store_key, adjusted} = resolve_and_adjust(state, pointer)
+    state = put_pointer(state, adjusted, store_key)
+    save_store(state, store_key)
     {:reply, :ok, state}
   end
 
@@ -60,6 +80,7 @@ defmodule DocPointers.Store do
 
       pointer ->
         now = DateTime.utc_now() |> DateTime.to_iso8601()
+        store_key = Map.get(state.store_membership, uuid, "")
 
         updated =
           pointer
@@ -69,8 +90,8 @@ defmodule DocPointers.Store do
           |> maybe_update(:file_path, updates)
           |> Map.put(:updated_at, now)
 
-        state = put_pointer(state, updated)
-        save_pointers(state)
+        state = put_pointer(state, updated, store_key)
+        save_store(state, store_key)
         {:reply, {:ok, updated}, state}
     end
   end
@@ -98,13 +119,56 @@ defmodule DocPointers.Store do
     {:reply, {result, length(pointers)}, state}
   end
 
+  # -- Submodule detection --
+
+  defp detect_submodules(root) do
+    gitmodules_path = Path.join(root, ".gitmodules")
+
+    if File.exists?(gitmodules_path) do
+      gitmodules_path
+      |> File.read!()
+      |> parse_gitmodules()
+      |> Enum.sort_by(&byte_size/1, :desc)
+    else
+      []
+    end
+  end
+
+  defp parse_gitmodules(content) do
+    Regex.scan(~r/path\s*=\s*(.+)/, content)
+    |> Enum.map(fn [_, path] -> String.trim(path) end)
+  end
+
+  defp resolve_store_key(submodules, file_path) when is_binary(file_path) do
+    Enum.find(submodules, "", fn sub_path ->
+      String.starts_with?(file_path, sub_path <> "/")
+    end)
+  end
+
+  defp resolve_store_key(_submodules, _), do: ""
+
+  defp resolve_and_adjust(state, %Pointer{} = pointer) do
+    store_key = resolve_store_key(state.submodules, pointer.file_path)
+
+    adjusted =
+      if store_key != "" and pointer.file_path do
+        prefix = store_key <> "/"
+        %{pointer | file_path: String.replace_prefix(pointer.file_path, prefix, "")}
+      else
+        pointer
+      end
+
+    {store_key, adjusted}
+  end
+
   # -- Internals --
 
-  defp put_pointer(state, %Pointer{} = pointer) do
+  defp put_pointer(state, %Pointer{} = pointer, store_key) do
     %{
       state
       | pointers: Map.put(state.pointers, pointer.uuid, pointer),
-        token_index: Map.put(state.token_index, pointer.token, pointer.uuid)
+        token_index: Map.put(state.token_index, pointer.token, pointer.uuid),
+        store_membership: Map.put(state.store_membership, pointer.uuid, store_key)
     }
   end
 
@@ -127,37 +191,52 @@ defmodule DocPointers.Store do
     Enum.filter(pointers, fn p -> p.class == class end)
   end
 
-  defp meta_dir(state), do: Path.join(state.root, ".meta")
-  defp pointers_path(state), do: Path.join(meta_dir(state), "pointers.yaml")
+  defp store_root(state, ""), do: state.root
+  defp store_root(state, store_key), do: Path.join(state.root, store_key)
+
+  defp meta_dir(state, store_key), do: Path.join(store_root(state, store_key), ".meta")
+  defp pointers_path(state, store_key), do: Path.join(meta_dir(state, store_key), "pointers.yaml")
   defp legacy_json_path(state), do: Path.join([state.root, "docs", "doc-pointer-db.json"])
 
-  defp load_pointers(state) do
-    state = %{state | pointers: %{}, token_index: %{}}
+  defp load_all_pointers(state) do
+    store_keys = ["" | state.submodules]
 
-    cond do
-      File.exists?(pointers_path(state)) ->
-        load_from_yaml(state)
+    state =
+      Enum.reduce(store_keys, state, fn store_key, acc ->
+        path = pointers_path(acc, store_key)
 
-      File.exists?(legacy_json_path(state)) ->
-        state = import_legacy_json(state)
-        save_pointers(state)
-        state
+        if File.exists?(path) do
+          load_from_yaml(acc, store_key, path)
+        else
+          acc
+        end
+      end)
 
-      true ->
-        state
-    end
+    maybe_load_legacy(state)
   end
 
-  defp load_from_yaml(state) do
-    case YamlElixir.read_from_file(pointers_path(state)) do
+  defp load_from_yaml(state, store_key, path) do
+    case YamlElixir.read_from_file(path) do
       {:ok, %{"pointers" => pointers}} when is_map(pointers) ->
         Enum.reduce(pointers, state, fn {uuid, data}, acc ->
           pointer = Pointer.from_map(uuid, data)
-          put_pointer(acc, pointer)
+          put_pointer(acc, pointer, store_key)
         end)
 
       _ ->
         state
+    end
+  end
+
+  defp maybe_load_legacy(state) do
+    legacy = legacy_json_path(state)
+
+    if map_size(state.pointers) == 0 and File.exists?(legacy) do
+      state = import_legacy_json(state)
+      save_store(state, "")
+      state
+    else
+      state
     end
   end
 
@@ -181,7 +260,7 @@ defmodule DocPointers.Store do
                   line: data["line"]
                 })
 
-              put_pointer(acc, pointer)
+              put_pointer(acc, pointer, "")
             end)
 
           _ ->
@@ -193,17 +272,20 @@ defmodule DocPointers.Store do
     end
   end
 
-  defp save_pointers(state) do
-    dir = meta_dir(state)
+  defp save_store(state, store_key) do
+    dir = meta_dir(state, store_key)
     File.mkdir_p!(dir)
 
-    yaml_map =
-      state.pointers
+    store_pointers =
+      state.store_membership
+      |> Enum.filter(fn {_uuid, sk} -> sk == store_key end)
+      |> Enum.map(fn {uuid, _} -> {uuid, state.pointers[uuid]} end)
+      |> Enum.reject(fn {_, p} -> is_nil(p) end)
       |> Enum.sort_by(fn {uuid, _} -> uuid end)
       |> Enum.map(fn {uuid, pointer} -> {uuid, Pointer.to_map(pointer)} end)
       |> Map.new()
 
-    content = Ymlr.document!(%{"pointers" => yaml_map})
-    File.write!(pointers_path(state), content)
+    content = Ymlr.document!(%{"pointers" => store_pointers})
+    File.write!(pointers_path(state, store_key), content)
   end
 end
