@@ -53,20 +53,20 @@ listener (default port **4242**) exposing tools `doc-pointer/{generate,lookup,li
 ```mermaid
 flowchart TB
   subgraph clients [Clients]
-    API[DocPointers.generate / Elixir callers]
-    MCPClient[MCP client e.g. Claude Code]
+    API["DocPointers.generate / Elixir callers"]
+    MCPClient["MCP client e.g. Claude Code"]
   end
 
-  subgraph otp [OTP :doc_pointers]
+  subgraph otp [OTP doc_pointers]
     App[Application]
-    Store[Store GenServer]
+    Store["Store GenServer"]
     App --> Store
   end
 
   subgraph mcp_runtime [MCP process tree]
-    MCP[DocPointers.MCP]
-    Bandit[Bandit : StreamableHTTP.Plug]
-    Tools[Tools: generate lookup list update]
+    MCP["DocPointers.MCP"]
+    Bandit["Bandit StreamableHTTP.Plug"]
+    Tools["Tools: generate lookup list update"]
     MCP --> Tools
     Bandit --> MCP
   end
@@ -74,9 +74,9 @@ flowchart TB
   API --> Store
   Tools --> Store
   Tools --> API
-  MCPClient -->|HTTP /mcp| Bandit
+  MCPClient -->|"HTTP /mcp"| Bandit
 
-  Store --> YAML[".meta/pointers.yaml\n(root + submodules)"]
+  Store --> YAML[".meta/pointers.yaml<br/>root plus submodules"]
   Store -.->|if empty| Legacy["docs/doc-pointer-db.json"]
 ```
 
@@ -84,24 +84,24 @@ flowchart TB
 
 ```mermaid
 flowchart LR
-  A["file_path + function\n(+ optional salt)"] --> B["UUID5.build_name\ndoc-pointers:..."]
-  B --> C["UUID5.generate\nSHA-1 + v5 bits"]
-  C --> D["Hieroglyph.encode\n4 glyphs"]
-  D --> E{token free?}
-  E -->|no| F["attempt++"] --> B
+  A["file_path + function<br/>optional salt"] --> B["UUID5.build_name"]
+  B --> C["UUID5.generate SHA-1"]
+  C --> D["Hieroglyph.encode 4 glyphs"]
+  D --> E{"token free?"}
+  E -->|no| F["increment attempt"] --> B
   E -->|yes| G["Pointer.new + Store.put"]
-  G --> H["YAML write\nby store_key"]
+  G --> H["YAML write by store_key"]
 ```
 
 ### Submodule store resolution
 
 ```mermaid
 flowchart TD
-  Put[Store.put pointer] --> Resolve{file_path under\n.gitmodules path?}
-  Resolve -->|yes longest match| Sub["store_key = submodule path\nstrip prefix from file_path"]
-  Resolve -->|no| Root["store_key = \"\"\nwrite at project root"]
-  Sub --> Write["{root}/{store_key}/.meta/pointers.yaml"]
-  Root --> WriteRoot["{root}/.meta/pointers.yaml"]
+  Put["Store.put pointer"] --> Resolve{"file_path under a gitmodules path?"}
+  Resolve -->|yes longest match| Sub["store_key = submodule path<br/>strip prefix from file_path"]
+  Resolve -->|no| Root["store_key empty<br/>write at project root"]
+  Sub --> Write["root / store_key / .meta/pointers.yaml"]
+  Root --> WriteRoot["root / .meta/pointers.yaml"]
 ```
 
 ---
