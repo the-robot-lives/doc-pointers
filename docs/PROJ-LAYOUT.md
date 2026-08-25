@@ -11,7 +11,7 @@ Plain tree: [`PROJ-LAYOUT.summary.md`](PROJ-LAYOUT.summary.md).
 ```
 doc-pointers/
 ├── mix.exs · mix.lock            # ★ Mix project :doc_pointers (Elixir ~> 1.18)
-├── README.md                     # Hex-style scaffold (description still TODO)
+├── README.md                     # Front door: MCP + library API, storage, config
 │
 ├── lib/
 │   ├── doc_pointers.ex           # Public API: DocPointers.generate/3,4
