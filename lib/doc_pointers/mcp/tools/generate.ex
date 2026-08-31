@@ -8,26 +8,44 @@ defmodule DocPointers.MCP.Tools.Generate do
     annotations: [destructive_hint: true]
 
   input do
-    field :file_path, :string, required: true,
+    field(:file_path, :string,
+      required: true,
       description: "Relative path to the source file (e.g. lib/my_module.ex)"
-    field :function_name, :string, required: true,
+    )
+
+    field(:function_name, :string,
+      required: true,
       description: "Function or method name"
-    field :description, :string, required: true,
+    )
+
+    field(:description, :string,
+      required: true,
       description: "Human-readable description of what this code location does"
-    field :class, :string,
-      description: "Module or class name (e.g. MyApp.Auth)"
-    field :line, :integer,
-      description: "Line number in the source file"
-    field :salt, :string,
-      description: "Optional deterministic salt for UUID derivation"
-    field :name_override, :string,
+    )
+
+    field(:class, :string, description: "Module or class name (e.g. MyApp.Auth)")
+    field(:line, :integer, description: "Line number in the source file")
+    field(:salt, :string, description: "Optional deterministic salt for UUID derivation")
+
+    field(:name_override, :string,
       description: "Override the auto-derived name (default: file_path::function_name)"
+    )
+
+    field(:confirm, :boolean,
+      description: "Required true unless the server was started with --write"
+    )
   end
 
   @max_attempts 10_000
 
   @impl true
-  def call(args, _ctx) do
+  def call(args, ctx) do
+    with :ok <- DocPointers.MCP.Writes.authorize(args, ctx) do
+      do_call(args)
+    end
+  end
+
+  defp do_call(args) do
     base_name =
       args[:name_override] ||
         DocPointers.UUID5.build_annotation_name(args.file_path, args.function_name)

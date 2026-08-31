@@ -7,14 +7,25 @@ defmodule DocPointers.MCP do
     code-stable cross-document references using UUIDv5-derived 4-character hieroglyphic
     tokens from Egyptian, Meroitic, and Anatolian Unicode blocks.
 
-    Use doc-pointer/generate to mint new pointers, doc-pointer/lookup to find existing
-    ones, doc-pointer/list to browse, and doc-pointer/update to change metadata.
+    Default tools are read-only: doc-pointer/lookup and doc-pointer/list.
+    doc-pointer/generate and doc-pointer/update persist to .meta/pointers.yaml.
+    They are listed when the server is started with --write (or DOC_POINTERS_MCP_WRITES=1);
+    otherwise they require confirm=true (or a client confirmation prompt).
 
     All pointers are stored in .meta/pointers.yaml at the project root, keyed by full UUID.
     """
 
-  tool DocPointers.MCP.Tools.Generate, category: "Pointers"
-  tool DocPointers.MCP.Tools.Lookup, category: "Pointers"
-  tool DocPointers.MCP.Tools.List, category: "Pointers"
-  tool DocPointers.MCP.Tools.Update, category: "Pointers"
+  tool(DocPointers.MCP.Tools.Lookup, category: "Pointers")
+  tool(DocPointers.MCP.Tools.List, category: "Pointers")
+  tool(DocPointers.MCP.Tools.Generate, category: "Pointers", hidden: true)
+  tool(DocPointers.MCP.Tools.Update, category: "Pointers", hidden: true)
+
+  @impl true
+  def handle_list_tools(cursor, _ctx) do
+    Noizu.MCP.Server.Features.Tools.list_registered(
+      __mcp__(:tools),
+      cursor,
+      include_hidden: DocPointers.MCP.Writes.enabled?()
+    )
+  end
 end
