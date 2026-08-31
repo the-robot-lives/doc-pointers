@@ -13,9 +13,9 @@ doc-pointers/
 │   │   ├── uuid5.ex · hieroglyph.ex · pointer.ex
 │   │   ├── store.ex                    # YAML GenServer + submodule split
 │   │   ├── mcp.ex                      # MCP server registry
-│   │   └── mcp/tools/                  # generate · lookup · list · update
-│   └── mix/tasks/doc_pointers.mcp.server.ex
-├── test/                               # uuid5, hieroglyph, store, generate, golden
+│   │   └── mcp/                        # writes gate, runtime, tools
+│   └── mix/tasks/                      # mcp.stdio (preferred), mcp.server (loopback)
+├── test/                               # uuid5, hieroglyph, store, generate, MCP, golden
 └── docs/
     ├── PROJ-LAYOUT.md · PROJ-LAYOUT.summary.md
 ```

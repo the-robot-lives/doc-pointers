@@ -2,7 +2,8 @@
 
 Elixir Mix app (`:doc_pointers`) that mints **UUIDv5-derived 4-character hieroglyph
 tokens** as durable, code-stable cross-document references. Dual surface: programmatic
-API (`DocPointers.generate/3,4`) and an MCP tool server (Streamable HTTP via Bandit).
+API (`DocPointers.generate/3,4`) and an MCP tool server (stdio preferred; optional
+loopback Streamable HTTP via Bandit).
 
 Portfolio path: `Portfolio/Apps/Developer/doc-pointers`. Layout companion:
 [`PROJ-LAYOUT.md`](PROJ-LAYOUT.md). Quick reference: [`PROJ-ARCH.summary.md`](PROJ-ARCH.summary.md).
@@ -24,9 +25,10 @@ YAML map at `{root}/.meta/pointers.yaml`, keyed by UUID, with a secondary in-mem
 token index. When the configured root has `.gitmodules`, file paths under a submodule
 are stripped of that prefix and written into that submodule’s own `.meta/pointers.yaml`.
 
-OTP boots a single `DocPointers.Store` GenServer. The Mix task
-`mix doc_pointers.mcp.server` additionally supervises `DocPointers.MCP` and a Bandit
-listener (default port **4242**) exposing tools `doc-pointer/{generate,lookup,list,update}`.
+OTP boots a single `DocPointers.Store` GenServer. `mix doc_pointers.mcp.stdio`
+supervises `DocPointers.MCP` with `transport: :stdio`. Optional
+`mix doc_pointers.mcp.server` binds Bandit to **127.0.0.1:4242**. Default listed
+tools are lookup/list; generate/update require `--write` or `confirm=true`.
 
 ---
 
@@ -41,8 +43,9 @@ listener (default port **4242**) exposing tools `doc-pointer/{generate,lookup,li
 | Model | `DocPointers.Pointer` | Struct + YAML map codec (`to_map` / `from_map`) |
 | Store | `DocPointers.Store` | GenServer: load/save YAML, token index, submodule split, legacy JSON import |
 | MCP server | `DocPointers.MCP` | `Noizu.MCP.Server` registry (`doc_pointers` v0.1.0) |
-| Tools | `mcp/tools/*` | generate · lookup · list · update |
-| HTTP entry | `Mix.Tasks.DocPointers.Mcp.Server` | Bandit + Streamable HTTP Plug on `/mcp` |
+| Tools | `mcp/tools/*` | lookup · list (default); generate · update (`--write` / confirm) |
+| stdio entry | `Mix.Tasks.DocPointers.Mcp.Stdio` | `{DocPointers.MCP, transport: :stdio}` |
+| HTTP entry | `Mix.Tasks.DocPointers.Mcp.Server` | Bandit + Streamable HTTP Plug on `127.0.0.1:/mcp` |
 
 ---
 
@@ -65,16 +68,19 @@ flowchart TB
 
   subgraph mcp_runtime [MCP process tree]
     MCP["DocPointers.MCP"]
-    Bandit["Bandit StreamableHTTP.Plug"]
-    Tools["Tools: generate lookup list update"]
+    Bandit["Bandit 127.0.0.1 StreamableHTTP.Plug"]
+    Stdio["stdio transport"]
+    Tools["Tools: lookup list (+ generate update)"]
     MCP --> Tools
     Bandit --> MCP
+    Stdio --> MCP
   end
 
   API --> Store
   Tools --> Store
   Tools --> API
   MCPClient -->|"HTTP /mcp"| Bandit
+  MCPClient -->|stdio| Stdio
 
   Store --> YAML[".meta/pointers.yaml<br/>root plus submodules"]
   Store -.->|if empty| Legacy["docs/doc-pointer-db.json"]
@@ -143,10 +149,10 @@ On-disk shape: `%{"pointers" => %{uuid => map_without_uuid}}`. In-memory Store a
 
 | Tool | Mutates? | Behavior |
 |------|----------|----------|
-| `doc-pointer/generate` | yes | Mint unique token; return uuid, token, marker, declaration |
 | `doc-pointer/lookup` | no | By token, uuid, file_path, and/or function_name |
 | `doc-pointer/list` | no | Paginated list; filter `file_prefix`, `class` (limit ≤ 500) |
-| `doc-pointer/update` | yes | Metadata only (description, class, line, file_path) by uuid or token |
+| `doc-pointer/generate` | yes (`--write` or `confirm`) | Mint unique token; return uuid, token, marker, declaration |
+| `doc-pointer/update` | yes (`--write` or `confirm`) | Metadata only (description, class, line, file_path) by uuid or token |
 
 Generate logic is duplicated in the MCP tool and `DocPointers.generate/4` (same
 collision algorithm); both write through `Store`.
@@ -162,10 +168,11 @@ collision algorithm); both write through `Store`.
 | HTTP | `bandit` `~> 1.6`, `plug` `~> 1.16` |
 | Persistence | `yaml_elixir` (read), `ymlr` (write), `jason` (legacy JSON) |
 | Crypto | Erlang `:crypto` (SHA-1 for UUIDv5) |
-| Config | `DOC_POINTERS_ROOT`, `DOC_POINTERS_PORT`; Mix flags `--root`, `--port` |
+| Config | `DOC_POINTERS_ROOT`, `DOC_POINTERS_PORT`, `DOC_POINTERS_MCP_WRITES`; Mix flags `--root`, `--port`, `--write` |
 
-**Run MCP:** `mix doc_pointers.mcp.server` → `http://localhost:4242/mcp`  
-**Register:** `claude mcp add doc-pointers --transport http http://localhost:4242/mcp`
+**Run MCP:** `mix doc_pointers.mcp.stdio` (preferred)  
+**HTTP:** `mix doc_pointers.mcp.server` → `http://127.0.0.1:4242/mcp`  
+**Register:** `claude mcp add doc-pointers -- mix doc_pointers.mcp.stdio`
 
 ---
 
@@ -174,7 +181,7 @@ collision algorithm); both write through `Store`.
 - **In scope:** mint/lookup/list/update pointers; YAML (and one-shot legacy JSON) storage;
   submodule-aware write routing; MCP + library API.
 - **Out of scope:** scanning source trees for markers, CI enforcement of pointers in code,
-  multi-node Store clustering, auth on the MCP HTTP endpoint (local-dev oriented).
+  multi-node Store clustering, auth on the MCP HTTP endpoint (loopback-only; prefer stdio).
 - **Not packaged here:** target-project `.meta/` files, `_build/` / `deps/`.
 
 See [`PROJ-LAYOUT.md`](PROJ-LAYOUT.md) for directory tree and setup details.

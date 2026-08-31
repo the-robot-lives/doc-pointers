@@ -8,8 +8,12 @@ defmodule DocPointers.MCP.Tools.GenerateTest do
     tmp_dir = System.tmp_dir!() |> Path.join("doc_pointers_gen_test_#{:rand.uniform(100_000)}")
     File.mkdir_p!(tmp_dir)
     Store.set_root(tmp_dir)
+    Application.put_env(:doc_pointers, :mcp_writes, true)
 
-    on_exit(fn -> File.rm_rf!(tmp_dir) end)
+    on_exit(fn ->
+      Application.delete_env(:doc_pointers, :mcp_writes)
+      File.rm_rf!(tmp_dir)
+    end)
 
     {:ok, root: tmp_dir}
   end

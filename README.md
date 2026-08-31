@@ -7,26 +7,134 @@ Line numbers rot. `⟦𓳔𔐮𔘟𔄵⟧` does not.
 
 Elixir `~> 1.18` Mix app (`:doc_pointers`). Two surfaces share one store:
 
-- **MCP** — Streamable HTTP tools for agents (`doc-pointer/generate`, `lookup`, `list`, `update`)
+- **MCP** — stdio (preferred) or loopback Streamable HTTP
 - **Library** — `DocPointers.generate/3,4` for Elixir callers
+
+Default MCP tools are read-only (`doc-pointer/lookup`, `doc-pointer/list`).
+`generate` / `update` stay off unless you pass `--write` or `confirm=true`.
 
 ## Quick start
 
 ```bash
 mix deps.get
 mix test
+mix compile
+mix doc_pointers.mcp.stdio --root /path/to/project
+```
+
+`--root` defaults to `DOC_POINTERS_ROOT` or cwd. Add `--write` to list and allow
+generate/update without a per-call `confirm=true`. Same flag on the HTTP task.
+
+HTTP (optional, binds `127.0.0.1` only, no auth):
+
+```bash
 mix doc_pointers.mcp.server --port 4242 --root /path/to/project
 ```
 
-Server: `http://localhost:4242/mcp` (no auth — local-dev only).
+`cwd` in the snippets below must be this Mix project (or any Mix project that
+depends on `:doc_pointers`). Compile once (`mix compile`) so Mix does not print
+to stdout and corrupt the stdio stream.
 
-Point an MCP client at that URL (Streamable HTTP). Claude Code:
+## MCP client install
+
+Replace `/ABS/doc-pointers` with this checkout. Default is lookup/list only;
+append `--write` (or set `DOC_POINTERS_MCP_WRITES=1`) to expose generate/update.
+
+### Claude Code
 
 ```bash
-claude mcp add doc-pointers --transport http http://localhost:4242/mcp
+claude mcp add doc-pointers -- mix doc_pointers.mcp.stdio
+# writes:
+# claude mcp add doc-pointers -- mix doc_pointers.mcp.stdio --write
 ```
 
-The process must be running; a handshake failure usually means the Mix task is not up.
+From another directory:
+
+```bash
+claude mcp add-json doc-pointers '{
+  "command": "mix",
+  "args": ["doc_pointers.mcp.stdio"],
+  "cwd": "/ABS/doc-pointers"
+}'
+```
+
+### Claude Desktop
+
+`~/Library/Application Support/Claude/claude_desktop_config.json` (macOS;
+`%APPDATA%\Claude\claude_desktop_config.json` on Windows):
+
+```json
+{
+  "mcpServers": {
+    "doc-pointers": {
+      "command": "mix",
+      "args": ["doc_pointers.mcp.stdio"],
+      "cwd": "/ABS/doc-pointers"
+    }
+  }
+}
+```
+
+### Codex
+
+`~/.codex/config.toml` (or project `.codex/config.toml`):
+
+```toml
+[mcp_servers.doc-pointers]
+command = "mix"
+args = ["doc_pointers.mcp.stdio"]
+cwd = "/ABS/doc-pointers"
+startup_timeout_sec = 60
+```
+
+### Cursor
+
+`.cursor/mcp.json` (project) or `~/.cursor/mcp.json` (user):
+
+```json
+{
+  "mcpServers": {
+    "doc-pointers": {
+      "command": "mix",
+      "args": ["doc_pointers.mcp.stdio"],
+      "cwd": "/ABS/doc-pointers"
+    }
+  }
+}
+```
+
+### VS Code
+
+`.vscode/mcp.json`:
+
+```json
+{
+  "servers": {
+    "doc-pointers": {
+      "type": "stdio",
+      "command": "mix",
+      "args": ["doc_pointers.mcp.stdio"],
+      "cwd": "/ABS/doc-pointers"
+    }
+  }
+}
+```
+
+### Grok
+
+```bash
+grok mcp add doc-pointers -- mix doc_pointers.mcp.stdio
+```
+
+`~/.grok/config.toml` (or project `.grok/config.toml`). Grok has no `cwd` field —
+run `grok` from a Mix project that depends on this app, or wrap the command:
+
+```toml
+[mcp_servers.doc-pointers]
+command = "sh"
+args = ["-c", "cd /ABS/doc-pointers && exec mix doc_pointers.mcp.stdio"]
+startup_timeout_sec = 60
+```
 
 ## What a pointer is
 
@@ -65,12 +173,15 @@ Namespace: `64e9408c-37a7-5f92-8893-f149cbde01c0`.
 
 ## MCP tools
 
-| Tool | Mutates? | Required | Does |
-|------|----------|----------|------|
-| `doc-pointer/generate` | yes | `file_path`, `function_name`, `description` | Mint UUID + token; persist; return `marker` / `declaration` |
-| `doc-pointer/lookup` | no | one of `token`, `uuid`, `file_path`, `function_name` | Find existing pointers |
-| `doc-pointer/list` | no | — | Paginated list (`limit` default 50, max 500) |
-| `doc-pointer/update` | yes | `uuid` or `token` | Metadata only (`description`, `class`, `line`, `file_path`) |
+| Tool | Mutates? | Default listed? | Required | Does |
+|------|----------|-----------------|----------|------|
+| `doc-pointer/lookup` | no | yes | one of `token`, `uuid`, `file_path`, `function_name` | Find existing pointers |
+| `doc-pointer/list` | no | yes | — | Paginated list (`limit` default 50, max 500) |
+| `doc-pointer/generate` | yes | `--write` only | `file_path`, `function_name`, `description` | Mint UUID + token; persist; return `marker` / `declaration` |
+| `doc-pointer/update` | yes | `--write` only | `uuid` or `token` | Metadata only (`description`, `class`, `line`, `file_path`) |
+
+Write tools also accept `confirm=true` when the server was started without `--write`
+(clients that support elicitation may be prompted instead).
 
 Optional on generate: `class`, `line`, `salt`, `name_override`.
 
@@ -112,7 +223,8 @@ When YAML is empty, the store will import legacy `{root}/docs/doc-pointer-db.jso
 | Flag / env | Default | Meaning |
 |------------|---------|---------|
 | `--root` / `DOC_POINTERS_ROOT` | cwd | Project root for `.meta/` |
-| `--port` / `DOC_POINTERS_PORT` | `4242` | HTTP port for `/mcp` |
+| `--write` / `DOC_POINTERS_MCP_WRITES` | off | List and allow generate/update |
+| `--port` / `DOC_POINTERS_PORT` | `4242` | Loopback HTTP port (`mix doc_pointers.mcp.server`) |
 | `config :doc_pointers, root: …` | — | OTP app env, used if the env var is unset |
 
 ## Mix dependency (git)
@@ -127,10 +239,12 @@ def deps do
 end
 ```
 
+Then `mix doc_pointers.mcp.stdio` from that project (cwd can be the consumer).
+
 ## Not in this repo
 
 - Scanning trees for `⟦…⟧` markers, or CI that enforces them
-- Auth on the HTTP MCP endpoint
+- Auth on the HTTP MCP endpoint (loopback-only; prefer stdio)
 - Multi-node store clustering
 - Target-project `.meta/` files (they belong in the annotated repo)
 - Mix artifacts (`_build/`, `deps/`)

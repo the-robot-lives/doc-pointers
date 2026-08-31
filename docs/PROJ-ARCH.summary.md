@@ -5,7 +5,7 @@ Path: `Portfolio/Apps/Developer/doc-pointers`. Full: [`PROJ-ARCH.md`](PROJ-ARCH.
 
 ## What it is
 
-- Elixir OTP app (`:doc_pointers`) + MCP server (Bandit Streamable HTTP, port **4242**)
+- Elixir OTP app (`:doc_pointers`) + MCP server (stdio preferred; optional Bandit on **127.0.0.1:4242**)
 - Deterministic tokens: `doc-pointers:{name}[:salt][:attempt]` under fixed UUIDv5 NS
 - Markers `⟦TOKEN⟧`; store `.meta/pointers.yaml` (per root + git submodules)
 - Legacy import: `docs/doc-pointer-db.json` if YAML empty
@@ -17,15 +17,15 @@ Path: `Portfolio/Apps/Developer/doc-pointers`. Full: [`PROJ-ARCH.md`](PROJ-ARCH.
 | `DocPointers` | Public generate + collision-retry |
 | `UUID5` / `Hieroglyph` / `Pointer` | Pure encode + model |
 | `Store` | GenServer YAML index + submodule split |
-| `MCP` + tools | generate · lookup · list · update |
-| Mix task | HTTP MCP on `/mcp` |
+| `MCP` + tools | lookup · list (default); generate · update (`--write`) |
+| Mix tasks | `mcp.stdio` (preferred); `mcp.server` loopback HTTP |
 
 ## Flows
 
 ```
 generate: name → UUIDv5 → 4 glyphs → retry if token taken → Store.put → YAML
 put path: resolve .gitmodules longest prefix → strip path → write that store’s YAML
-MCP:     client → Bandit Plug → DocPointers.MCP tools → Store / generate
+MCP:     client → stdio or 127.0.0.1 Bandit → DocPointers.MCP tools → Store / generate
 ```
 
 ## Design bullets
@@ -43,8 +43,9 @@ Elixir 1.18 · noizu_mcp · bandit/plug · yaml_elixir/ymlr · jason · :crypto
 ## Ops
 
 ```
-mix doc_pointers.mcp.server [--port 4242] [--root PATH]
-# DOC_POINTERS_ROOT, DOC_POINTERS_PORT
+mix doc_pointers.mcp.stdio [--root PATH] [--write]
+mix doc_pointers.mcp.server [--port 4242] [--root PATH] [--write]
+# DOC_POINTERS_ROOT, DOC_POINTERS_PORT, DOC_POINTERS_MCP_WRITES
 ```
 
 Non-goals: source scanning, multi-node Store, MCP auth.

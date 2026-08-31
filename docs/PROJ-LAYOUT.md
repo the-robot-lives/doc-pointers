@@ -22,13 +22,17 @@ doc-pointers/
 │   │   ├── pointer.ex            # %Pointer{} struct + YAML map codec
 │   │   ├── store.ex              # GenServer: load/save YAML, token index, submodule split
 │   │   ├── mcp.ex                # Noizu.MCP.Server "doc_pointers" tool registry
-│   │   └── mcp/tools/
-│   │       ├── generate.ex       #   doc-pointer/generate
-│   │       ├── lookup.ex         #   doc-pointer/lookup
-│   │       ├── list.ex           #   doc-pointer/list
-│   │       └── update.ex         #   doc-pointer/update
+│   │   └── mcp/
+│   │       ├── writes.ex         #   --write / confirm gate
+│   │       ├── runtime.ex        #   stdio + loopback HTTP boot
+│   │       └── tools/
+│   │           ├── generate.ex   #   doc-pointer/generate (hidden unless --write)
+│   │           ├── lookup.ex     #   doc-pointer/lookup
+│   │           ├── list.ex       #   doc-pointer/list
+│   │           └── update.ex     #   doc-pointer/update (hidden unless --write)
 │   └── mix/tasks/
-│       └── doc_pointers.mcp.server.ex  # mix doc_pointers.mcp.server (Bandit HTTP)
+│       ├── doc_pointers.mcp.stdio.ex   # mix doc_pointers.mcp.stdio (preferred)
+│       └── doc_pointers.mcp.server.ex  # mix doc_pointers.mcp.server (127.0.0.1 HTTP)
 │
 ├── test/
 │   ├── test_helper.exs
@@ -37,7 +41,7 @@ doc-pointers/
 │       ├── uuid5_test.exs
 │       ├── hieroglyph_test.exs
 │       ├── store_test.exs
-│       └── mcp/tools/generate_test.exs
+│       └── mcp/tools/generate_test.exs · writes_test.exs · mcp_test.exs
 │
 └── docs/
     ├── PROJ-LAYOUT.md            # This file
@@ -54,7 +58,8 @@ Tree is small — no `docs/layout/*` extracts.
 | `uuid5` / `hieroglyph` / `pointer` | Pure encode/model (no I/O) |
 | `store` | In-memory index + YAML at `{root\|submodule}/.meta/pointers.yaml` |
 | `mcp` + `mcp/tools/*` | MCP surface over Store / generate logic |
-| `mix/tasks/...mcp.server` | Streamable HTTP server (Bandit + Plug) |
+| `mix/tasks/...mcp.stdio` | Preferred local stdio transport |
+| `mix/tasks/...mcp.server` | Loopback Streamable HTTP (Bandit + Plug, 127.0.0.1) |
 
 ## Runtime storage (outside this repo tree)
 
@@ -69,9 +74,10 @@ Tree is small — no `docs/layout/*` extracts.
 | Item | Action |
 |------|--------|
 | Elixir | `~> 1.18`; `mix deps.get` then `mix test` |
-| MCP HTTP | `mix doc_pointers.mcp.server` (port **4242** or `DOC_POINTERS_PORT`) |
+| MCP stdio | `mix doc_pointers.mcp.stdio` (`--write` for generate/update) |
+| MCP HTTP | `mix doc_pointers.mcp.server` (127.0.0.1, port **4242** or `DOC_POINTERS_PORT`) |
 | Root | `--root PATH` or `DOC_POINTERS_ROOT` (default: cwd) |
-| Client | `claude mcp add doc-pointers --transport http http://localhost:4242/mcp` |
+| Client | `claude mcp add doc-pointers -- mix doc_pointers.mcp.stdio` |
 
 **Deps (runtime):** `noizu_mcp`, `yaml_elixir`, `ymlr`, `jason`, `bandit`, `plug`.
 
