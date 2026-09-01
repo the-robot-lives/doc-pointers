@@ -12,6 +12,11 @@ Plain tree: [`PROJ-LAYOUT.summary.md`](PROJ-LAYOUT.summary.md).
 doc-pointers/
 ├── mix.exs · mix.lock            # ★ Mix project :doc_pointers (Elixir ~> 1.18)
 ├── README.md                     # Front door: MCP + library API, storage, config
+├── merge-notes.md                # Working notes from branch merges
+│
+├── .formatter.exs                # mix format rules (standard Elixir)
+├── .tool-versions                # mise/asdf tool pins (Elixir/Erlang)
+├── .gitignore                    # excludes _build/, deps/, .DS_Store
 │
 ├── lib/
 │   ├── doc_pointers.ex           # Public API: DocPointers.generate/3,4
@@ -36,16 +41,22 @@ doc-pointers/
 │
 ├── test/
 │   ├── test_helper.exs
-│   ├── doc_pointers_test.exs     # E2E golden: UUID5 → hieroglyph
+│   ├── doc_pointers_test.exs           # E2E golden: UUID5 → hieroglyph
 │   └── doc_pointers/
-│       ├── uuid5_test.exs
-│       ├── hieroglyph_test.exs
-│       ├── store_test.exs
-│       └── mcp/tools/generate_test.exs · writes_test.exs · mcp_test.exs
+│       ├── uuid5_test.exs · hieroglyph_test.exs · store_test.exs
+│       ├── mcp_test.exs                # MCP tool registry / surface
+│       └── mcp/
+│           ├── writes_test.exs         #   --write / confirm gate
+│           ├── runtime_test.exs        #   stdio + HTTP boot
+│           └── tools/generate_test.exs
 │
 └── docs/
-    ├── PROJ-LAYOUT.md            # This file
-    └── PROJ-LAYOUT.summary.md    # Tree-only companion
+    ├── PROJ-LAYOUT.md                  # This file
+    ├── PROJ-LAYOUT.summary.md          # Tree-only companion
+    ├── PROJ-ARCH.md                    # Design, mint pipeline, data model
+    ├── PROJ-ARCH.summary.md            # Short architecture digest
+    ├── PROJ-SCHEMA.md                  # Data formats (.meta/pointers.yaml, legacy JSON) + config knobs
+    └── PROJ-SCHEMA.summary.md          # Schema quick-reference
 ```
 
 Tree is small — no `docs/layout/*` extracts.

@@ -40,6 +40,8 @@ MCP:     client → stdio or 127.0.0.1 Bandit → DocPointers.MCP tools → Stor
 
 Elixir 1.18 · noizu_mcp · bandit/plug · yaml_elixir/ymlr · jason · :crypto
 
+No SQL/DB — YAML + legacy-JSON data formats and config knobs: [`PROJ-SCHEMA.md`](PROJ-SCHEMA.md)
+
 ## Ops
 
 ```
