@@ -260,3 +260,5 @@ A Rust CLI with the same encode pipeline (scan / mint / git hook, not MCP) lives
 | [docs/PROJ-ARCH.summary.md](docs/PROJ-ARCH.summary.md) | Short architecture digest |
 | [docs/PROJ-LAYOUT.md](docs/PROJ-LAYOUT.md) | Directory map and setup |
 | [docs/PROJ-LAYOUT.summary.md](docs/PROJ-LAYOUT.summary.md) | Tree-only companion |
+| [docs/PROJ-SCHEMA.md](docs/PROJ-SCHEMA.md) | Data formats (`.meta/pointers.yaml`, legacy JSON) + config knobs |
+| [docs/PROJ-SCHEMA.summary.md](docs/PROJ-SCHEMA.summary.md) | Schema quick-reference |
