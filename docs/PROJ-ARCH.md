@@ -6,7 +6,8 @@ API (`DocPointers.generate/3,4`) and an MCP tool server (stdio preferred; option
 loopback Streamable HTTP via Bandit).
 
 Portfolio path: `Portfolio/Apps/Developer/doc-pointers`. Layout companion:
-[`PROJ-LAYOUT.md`](PROJ-LAYOUT.md). Quick reference: [`PROJ-ARCH.summary.md`](PROJ-ARCH.summary.md).
+[`PROJ-LAYOUT.md`](PROJ-LAYOUT.md). Data & config formats: [`PROJ-SCHEMA.md`](PROJ-SCHEMA.md).
+Quick reference: [`PROJ-ARCH.summary.md`](PROJ-ARCH.summary.md).
 
 ---
 
@@ -142,6 +143,8 @@ flowchart TD
 
 On-disk shape: `%{"pointers" => %{uuid => map_without_uuid}}`. In-memory Store also holds
 `token_index` (token → uuid) and `store_membership` (uuid → store_key).
+
+→ *Full field tables, legacy JSON format, and config knobs: [`PROJ-SCHEMA.md`](PROJ-SCHEMA.md)*
 
 ---
 
