@@ -41,7 +41,7 @@ defmodule DocPointers.Hieroglyph do
       size = finish - start + 1
 
       if remaining < size do
-        {:halt, <<(start + remaining)::utf8>>}
+        {:halt, <<start + remaining::utf8>>}
       else
         {:cont, remaining - size}
       end
