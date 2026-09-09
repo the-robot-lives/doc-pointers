@@ -5,14 +5,13 @@ defmodule DocPointers.MCP.Tools.List do
     annotations: [read_only_hint: true]
 
   input do
-    field :file_prefix, :string,
+    field(:file_prefix, :string,
       description: "Filter to pointers in files matching this prefix (e.g. lib/my_app/)"
-    field :class, :string,
-      description: "Filter to pointers belonging to this class/module"
-    field :limit, :integer,
-      description: "Maximum number of results (default 50, max 500)"
-    field :offset, :integer,
-      description: "Pagination offset (default 0)"
+    )
+
+    field(:class, :string, description: "Filter to pointers belonging to this class/module")
+    field(:limit, :integer, description: "Maximum number of results (default 50, max 500)")
+    field(:offset, :integer, description: "Pagination offset (default 0)")
   end
 
   @impl true

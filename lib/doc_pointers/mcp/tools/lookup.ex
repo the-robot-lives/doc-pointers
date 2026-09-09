@@ -5,14 +5,10 @@ defmodule DocPointers.MCP.Tools.Lookup do
     annotations: [read_only_hint: true]
 
   input do
-    field :token, :string,
-      description: "4-character hieroglyph token (e.g. 𓳔𔐮𔘟𔄵)"
-    field :uuid, :string,
-      description: "Full UUID string"
-    field :file_path, :string,
-      description: "Source file path to find pointers in"
-    field :function_name, :string,
-      description: "Function name to search for"
+    field(:token, :string, description: "4-character hieroglyph token (e.g. 𓳔𔐮𔘟𔄵)")
+    field(:uuid, :string, description: "Full UUID string")
+    field(:file_path, :string, description: "Source file path to find pointers in")
+    field(:function_name, :string, description: "Function name to search for")
   end
 
   @impl true

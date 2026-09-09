@@ -102,7 +102,7 @@ defmodule DocPointers.StoreTest do
 
     test "pagination" do
       for i <- 1..5 do
-        token_char = <<(0x13000 + i)::utf8>>
+        token_char = <<0x13000 + i::utf8>>
         token = String.duplicate(token_char, 4)
         Store.put(make_pointer("page-#{i}", token))
       end
@@ -130,14 +130,15 @@ defmodule DocPointers.StoreTest do
       docs_dir = Path.join(root, "docs")
       File.mkdir_p!(docs_dir)
 
-      json = Jason.encode!(%{
-        "𓀀𓀻𓃉𓏦" => %{
-          "path" => "lib/auth.ex",
-          "line" => 42,
-          "name" => "login",
-          "description" => "auto-generated pointer"
-        }
-      })
+      json =
+        Jason.encode!(%{
+          "𓀀𓀻𓃉𓏦" => %{
+            "path" => "lib/auth.ex",
+            "line" => 42,
+            "name" => "login",
+            "description" => "auto-generated pointer"
+          }
+        })
 
       File.write!(Path.join(docs_dir, "doc-pointer-db.json"), json)
 
