@@ -74,7 +74,7 @@ defmodule DocPointers.MCP.Runtime do
   Print client registration instructions (stderr — safe for all transports).
   """
   def print_client_setup(port) do
-    url = "http://127.0.0.1:#{port}/mcp"
+    url = "http://127.0.0.1:#{port}"
 
     IO.puts(:stderr, """
 

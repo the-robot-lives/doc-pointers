@@ -31,7 +31,7 @@ defmodule Mix.Tasks.DocPointers.Mcp.Server do
     port = DocPointers.MCP.Runtime.port(opts)
     DocPointers.MCP.Runtime.start_http!(port)
 
-    Mix.shell().info("doc-pointers MCP (loopback HTTP) → http://127.0.0.1:#{port}/mcp")
+    Mix.shell().info("doc-pointers MCP (loopback HTTP) → http://127.0.0.1:#{port}")
     Mix.shell().info("Prefer stdio for local clients: mix doc_pointers.mcp.stdio")
     DocPointers.MCP.Runtime.print_client_setup(port)
     Process.sleep(:infinity)
