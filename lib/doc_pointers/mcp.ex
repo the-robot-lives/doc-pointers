@@ -8,7 +8,8 @@ defmodule DocPointers.MCP do
     tokens from Egyptian, Meroitic, and Anatolian Unicode blocks.
 
     Default tools are read-only: doc-pointer/lookup and doc-pointer/list.
-    doc-pointer/generate and doc-pointer/update persist to .meta/pointers.yaml.
+    doc-pointer/generate, doc-pointer/generate-batch and doc-pointer/update
+    persist to .meta/pointers.yaml.
     They are listed when the server is started with --write (or DOC_POINTERS_MCP_WRITES=1);
     otherwise they require confirm=true (or a client confirmation prompt).
 
@@ -18,6 +19,7 @@ defmodule DocPointers.MCP do
   tool(DocPointers.MCP.Tools.Lookup, category: "Pointers")
   tool(DocPointers.MCP.Tools.List, category: "Pointers")
   tool(DocPointers.MCP.Tools.Generate, category: "Pointers", hidden: true)
+  tool(DocPointers.MCP.Tools.GenerateBatch, category: "Pointers", hidden: true)
   tool(DocPointers.MCP.Tools.Update, category: "Pointers", hidden: true)
 
   @impl true

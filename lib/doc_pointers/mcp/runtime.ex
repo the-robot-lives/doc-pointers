@@ -69,4 +69,20 @@ defmodule DocPointers.MCP.Runtime do
 
     :ok
   end
+
+  @doc """
+  Print client registration instructions (stderr — safe for all transports).
+  """
+  def print_client_setup(port) do
+    url = "http://127.0.0.1:#{port}/mcp"
+
+    IO.puts(:stderr, """
+
+    Add this MCP server to your client:
+
+      claude: claude mcp add --transport http doc-pointers #{url}
+      codex:  codex mcp add doc-pointers --url #{url}
+      grok:   grok mcp add doc-pointers --url #{url}
+    """)
+  end
 end

@@ -50,17 +50,37 @@ defmodule DocPointers.MCP.Tools.Generate do
       args[:name_override] ||
         DocPointers.UUID5.build_annotation_name(args.file_path, args.function_name)
 
-    case generate_with_collision_check(base_name, args[:salt], 0) do
+    register(%{
+      base_name: base_name,
+      file_path: args.file_path,
+      class: args[:class],
+      function: args.function_name,
+      line: args[:line],
+      description: args.description,
+      salt: args[:salt]
+    })
+  end
+
+  @doc """
+  Shared registration pipeline: mint a UUIDv5 + hieroglyph token for `base_name`,
+  persist the pointer, and return its metadata map. Used by doc-pointer/generate
+  and doc-pointer/generate-batch.
+
+  Attrs: base_name (required), function (required), file_path, class, line,
+  description, salt.
+  """
+  def register(attrs) do
+    case generate_with_collision_check(attrs.base_name, attrs[:salt], 0) do
       {:ok, uuid_string, token} ->
         pointer =
           DocPointers.Pointer.new(%{
             uuid: uuid_string,
             token: token,
-            file_path: args.file_path,
-            class: args[:class],
-            function: args.function_name,
-            line: args[:line],
-            description: args.description
+            file_path: attrs[:file_path],
+            class: attrs[:class],
+            function: attrs.function,
+            line: attrs[:line],
+            description: attrs[:description] || ""
           })
 
         DocPointers.Store.put(pointer)
@@ -71,10 +91,10 @@ defmodule DocPointers.MCP.Tools.Generate do
            token: token,
            marker: DocPointers.Hieroglyph.marker(token),
            declaration:
-             DocPointers.Hieroglyph.declaration(token, args.function_name, args.description),
-           file_path: args.file_path,
-           function: args.function_name,
-           class: args[:class]
+             DocPointers.Hieroglyph.declaration(token, attrs.function, attrs[:description] || ""),
+           file_path: attrs[:file_path],
+           function: attrs.function,
+           class: attrs[:class]
          }}
 
       {:error, :max_attempts} ->

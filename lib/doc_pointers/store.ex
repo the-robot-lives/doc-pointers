@@ -9,6 +9,7 @@ defmodule DocPointers.Store do
   end
 
   def set_root(root), do: GenServer.call(__MODULE__, {:set_root, root})
+  def root, do: GenServer.call(__MODULE__, :root)
   def get(uuid), do: GenServer.call(__MODULE__, {:get, uuid})
   def get_by_token(token), do: GenServer.call(__MODULE__, {:get_by_token, token})
   def put(pointer), do: GenServer.call(__MODULE__, {:put, pointer})
@@ -53,6 +54,10 @@ defmodule DocPointers.Store do
 
     state = load_all_pointers(state)
     {:reply, :ok, state}
+  end
+
+  def handle_call(:root, _from, state) do
+    {:reply, state.root, state}
   end
 
   def handle_call({:get, uuid}, _from, state) do
