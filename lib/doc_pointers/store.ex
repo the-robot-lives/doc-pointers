@@ -12,6 +12,7 @@ defmodule DocPointers.Store do
   def get(uuid), do: GenServer.call(__MODULE__, {:get, uuid})
   def get_by_token(token), do: GenServer.call(__MODULE__, {:get_by_token, token})
   def put(pointer), do: GenServer.call(__MODULE__, {:put, pointer})
+  def migrate, do: GenServer.call(__MODULE__, :migrate)
   def update(uuid, updates), do: GenServer.call(__MODULE__, {:update, uuid, updates})
   def all, do: GenServer.call(__MODULE__, :all)
   def token_exists?(token), do: GenServer.call(__MODULE__, {:token_exists?, token})
@@ -80,7 +81,7 @@ defmodule DocPointers.Store do
 
       pointer ->
         now = DateTime.utc_now() |> DateTime.to_iso8601()
-        store_key = Map.get(state.store_membership, uuid, "")
+        old_store_key = Map.get(state.store_membership, uuid, "")
 
         updated =
           pointer
@@ -90,14 +91,48 @@ defmodule DocPointers.Store do
           |> maybe_update(:file_path, updates)
           |> Map.put(:updated_at, now)
 
-        state = put_pointer(state, updated, store_key)
-        save_store(state, store_key)
-        {:reply, {:ok, updated}, state}
+        # file_path is stored relative to its store; re-prefix before re-resolving
+        # so the pointer migrates to the owning submodule when it moves.
+        {new_store_key, adjusted} =
+          resolve_and_adjust(state, %{
+            updated
+            | file_path: prefix_path(old_store_key, updated.file_path)
+          })
+
+        state = put_pointer(state, adjusted, new_store_key)
+        save_store(state, new_store_key)
+
+        if new_store_key != old_store_key do
+          save_store(state, old_store_key)
+        end
+
+        {:reply, {:ok, adjusted}, state}
     end
   end
 
   def handle_call(:all, _from, state) do
     {:reply, Map.values(state.pointers), state}
+  end
+
+  def handle_call(:migrate, _from, state) do
+    {state, moved, touched} =
+      state.pointers
+      |> Map.values()
+      |> Enum.reduce({state, 0, MapSet.new()}, fn pointer, {st, moved, touched} ->
+        old_store_key = Map.get(st.store_membership, pointer.uuid, "")
+        root_relative = prefix_path(old_store_key, pointer.file_path)
+        {new_store_key, adjusted} = resolve_and_adjust(st, %{pointer | file_path: root_relative})
+
+        if new_store_key == old_store_key do
+          {st, moved, touched}
+        else
+          st = put_pointer(st, adjusted, new_store_key)
+          {st, moved + 1, touched |> MapSet.put(old_store_key) |> MapSet.put(new_store_key)}
+        end
+      end)
+
+    Enum.each(MapSet.to_list(touched), &save_store(state, &1))
+    {:reply, %{moved: moved, stores: MapSet.to_list(touched)}, state}
   end
 
   def handle_call({:token_exists?, token}, _from, state) do
@@ -119,24 +154,31 @@ defmodule DocPointers.Store do
     {:reply, {result, length(pointers)}, state}
   end
 
-  # -- Submodule detection --
+  # -- Store detection --
+  #
+  # A store is any git repo at or below the root: the root itself (store_key "")
+  # plus every nested checkout (submodule) found via its `.git` entry. Routing by
+  # git boundary (not .gitmodules) so nested submodules like Portfolio/Libs/ai/genai
+  # resolve to their own folder rather than their top-level parent.
+
+  @ignored_segments [".git", "_build", "deps", "node_modules", ".claude", "cover", "tmp"]
 
   defp detect_submodules(root) do
-    gitmodules_path = Path.join(root, ".gitmodules")
-
-    if File.exists?(gitmodules_path) do
-      gitmodules_path
-      |> File.read!()
-      |> parse_gitmodules()
-      |> Enum.sort_by(&byte_size/1, :desc)
-    else
-      []
-    end
+    root
+    |> Path.join("**/.git")
+    |> Path.wildcard(match_dot: true)
+    |> Enum.reject(&(&1 |> Path.dirname() |> ignored_dir?()))
+    |> Enum.map(fn git_path ->
+      git_path |> String.trim_trailing(".git") |> Path.relative_to(root)
+    end)
+    |> Enum.reject(&(&1 == "."))
+    |> Enum.sort_by(&byte_size/1, :desc)
   end
 
-  defp parse_gitmodules(content) do
-    Regex.scan(~r/path\s*=\s*(.+)/, content)
-    |> Enum.map(fn [_, path] -> String.trim(path) end)
+  defp ignored_dir?(path) do
+    path
+    |> Path.split()
+    |> Enum.any?(&(&1 in @ignored_segments))
   end
 
   defp resolve_store_key(submodules, file_path) when is_binary(file_path) do
@@ -160,6 +202,10 @@ defmodule DocPointers.Store do
 
     {store_key, adjusted}
   end
+
+  defp prefix_path(_store_key, nil), do: nil
+  defp prefix_path("", file_path), do: file_path
+  defp prefix_path(store_key, file_path), do: Path.join(store_key, file_path)
 
   # -- Internals --
 
@@ -199,20 +245,16 @@ defmodule DocPointers.Store do
   defp legacy_json_path(state), do: Path.join([state.root, "docs", "doc-pointer-db.json"])
 
   defp load_all_pointers(state) do
-    store_keys = ["" | state.submodules]
-
-    state =
-      Enum.reduce(store_keys, state, fn store_key, acc ->
-        path = pointers_path(acc, store_key)
-
-        if File.exists?(path) do
-          load_from_yaml(acc, store_key, path)
-        else
-          acc
-        end
-      end)
-
-    maybe_load_legacy(state)
+    state.root
+    |> Path.join("**/.meta/pointers.yaml")
+    |> Path.wildcard(match_dot: true)
+    |> Enum.reject(&(&1 |> Path.dirname() |> ignored_dir?()))
+    |> Enum.reduce(state, fn path, acc ->
+      rel = Path.relative_to(path, acc.root)
+      store_key = resolve_store_key(acc.submodules, rel)
+      load_from_yaml(acc, store_key, path)
+    end)
+    |> maybe_load_legacy()
   end
 
   defp load_from_yaml(state, store_key, path) do
@@ -233,7 +275,7 @@ defmodule DocPointers.Store do
 
     if map_size(state.pointers) == 0 and File.exists?(legacy) do
       state = import_legacy_json(state)
-      save_store(state, "")
+      state.store_membership |> Map.values() |> Enum.uniq() |> Enum.each(&save_store(state, &1))
       state
     else
       state
@@ -260,7 +302,8 @@ defmodule DocPointers.Store do
                   line: data["line"]
                 })
 
-              put_pointer(acc, pointer, "")
+              {store_key, adjusted} = resolve_and_adjust(state, pointer)
+              put_pointer(acc, adjusted, store_key)
             end)
 
           _ ->
