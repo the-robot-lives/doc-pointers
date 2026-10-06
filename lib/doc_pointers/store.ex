@@ -161,13 +161,13 @@ defmodule DocPointers.Store do
   # git boundary (not .gitmodules) so nested submodules like Portfolio/Libs/ai/genai
   # resolve to their own folder rather than their top-level parent.
 
-  @ignored_segments [".git", "_build", "deps", "node_modules", ".claude", "cover", "tmp", ".meta"]
+  @ignored_segments [".git", "_build", "deps", "node_modules", ".claude", "cover", "tmp"]
 
   defp detect_submodules(root) do
     root
     |> Path.join("**/.git")
     |> Path.wildcard(match_dot: true)
-    |> Enum.reject(&ignored_path?/1)
+    |> Enum.reject(&(&1 |> Path.dirname() |> ignored_dir?()))
     |> Enum.map(fn git_path ->
       git_path |> String.trim_trailing(".git") |> Path.relative_to(root)
     end)
@@ -175,11 +175,10 @@ defmodule DocPointers.Store do
     |> Enum.sort_by(&byte_size/1, :desc)
   end
 
-  defp ignored_path?(path) do
+  defp ignored_dir?(path) do
     path
     |> Path.split()
-    |> MapSet.new()
-    |> MapSet.disjoint?(MapSet.new(@ignored_segments))
+    |> Enum.any?(&(&1 in @ignored_segments))
   end
 
   defp resolve_store_key(submodules, file_path) when is_binary(file_path) do
@@ -249,7 +248,7 @@ defmodule DocPointers.Store do
     state.root
     |> Path.join("**/.meta/pointers.yaml")
     |> Path.wildcard(match_dot: true)
-    |> Enum.reject(&ignored_path?/1)
+    |> Enum.reject(&(&1 |> Path.dirname() |> ignored_dir?()))
     |> Enum.reduce(state, fn path, acc ->
       rel = Path.relative_to(path, acc.root)
       store_key = resolve_store_key(acc.submodules, rel)

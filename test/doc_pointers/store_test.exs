@@ -180,6 +180,28 @@ defmodule DocPointers.StoreTest do
       assert nested.file_path == "lib/nested.ex"
     end
 
+    test "ignores git repos and yamls inside deps/node_modules/_build", %{root: root} do
+      vendored = Path.join([root, "deps", "vendored"])
+      File.mkdir_p!(Path.join(vendored, ".git"))
+
+      node_mod = Path.join([root, "sub", "node_modules", "pkg"])
+      File.mkdir_p!(Path.join(node_mod, ".git"))
+
+      Store.set_root(root)
+
+      # a vendored repo must not become a store: pointer routes to root yaml
+      Store.put(make_pointer("vendored-1", "𓀀𓀻𓃉𓏦", file_path: "deps/vendored/lib/x.ex"))
+      {:ok, data} = YamlElixir.read_from_file(Path.join([root, ".meta", "pointers.yaml"]))
+      assert Map.has_key?(data["pointers"], "vendored-1")
+      assert Store.get("vendored-1").file_path == "deps/vendored/lib/x.ex"
+      refute File.exists?(Path.join([vendored, ".meta", "pointers.yaml"]))
+
+      Store.put(make_pointer("nm-1", "𓳔𔐮𔘟𔄵", file_path: "sub/node_modules/pkg/lib/y.ex"))
+      {:ok, data} = YamlElixir.read_from_file(Path.join([root, ".meta", "pointers.yaml"]))
+      assert Map.has_key?(data["pointers"], "nm-1")
+      refute File.exists?(Path.join([node_mod, ".meta", "pointers.yaml"]))
+    end
+
     test "saves new submodule pointer into submodule store", %{root: root} do
       sub = Path.join(root, "sub")
       File.mkdir_p!(Path.join(sub, ".git"))
