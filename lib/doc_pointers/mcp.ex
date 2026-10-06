@@ -12,7 +12,10 @@ defmodule DocPointers.MCP do
     They are listed when the server is started with --write (or DOC_POINTERS_MCP_WRITES=1);
     otherwise they require confirm=true (or a client confirmation prompt).
 
-    All pointers are stored in .meta/pointers.yaml at the project root, keyed by full UUID.
+    Pointers are keyed by full UUID in the .meta/pointers.yaml of the git repo that
+    owns the file: the root for root-level files, each (nested) submodule's own
+    folder for files inside it. Pass file_path relative to the server root; it is
+    stored relative to the owning repo.
     """
 
   tool(DocPointers.MCP.Tools.Lookup, category: "Pointers")
