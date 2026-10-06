@@ -8,11 +8,14 @@ defmodule DocPointers.Store do
     GenServer.start_link(__MODULE__, root, name: __MODULE__)
   end
 
-  def set_root(root), do: GenServer.call(__MODULE__, {:set_root, root})
+  # Monorepo-scale recursive scans can take well over the default 5s.
+  @scan_timeout 120_000
+
+  def set_root(root), do: GenServer.call(__MODULE__, {:set_root, root}, @scan_timeout)
   def get(uuid), do: GenServer.call(__MODULE__, {:get, uuid})
   def get_by_token(token), do: GenServer.call(__MODULE__, {:get_by_token, token})
   def put(pointer), do: GenServer.call(__MODULE__, {:put, pointer})
-  def migrate, do: GenServer.call(__MODULE__, :migrate)
+  def migrate, do: GenServer.call(__MODULE__, :migrate, @scan_timeout)
   def update(uuid, updates), do: GenServer.call(__MODULE__, {:update, uuid, updates})
   def all, do: GenServer.call(__MODULE__, :all)
   def token_exists?(token), do: GenServer.call(__MODULE__, {:token_exists?, token})
@@ -163,7 +166,30 @@ defmodule DocPointers.Store do
 
   @ignored_segments [".git", "_build", "deps", "node_modules", ".claude", "cover", "tmp"]
 
+  # Git-driven: walk submodule metadata, not the file tree. A filesystem
+  # sweep of a real monorepo takes minutes (vendored node_modules/_build
+  # trees); `git submodule foreach --recursive` takes seconds and yields
+  # root-relative paths for nested submodules.
   defp detect_submodules(root) do
+    case System.cmd("git", ~w(submodule foreach --recursive --quiet echo $displaypath),
+           cd: root,
+           stderr_to_stdout: true
+         ) do
+      {out, 0} ->
+        out
+        |> String.split("\n")
+        |> Enum.map(&String.trim/1)
+        |> Enum.reject(&(&1 == "" or ignored_dir?(&1)))
+        |> Enum.uniq()
+        |> Enum.sort_by(&byte_size/1, :desc)
+
+      _ ->
+        fallback_detect_submodules(root)
+    end
+  end
+
+  # Fallback for roots that are not a git superproject: bounded filesystem sweep.
+  defp fallback_detect_submodules(root) do
     root
     |> Path.join("**/.git")
     |> Path.wildcard(match_dot: true)
@@ -245,10 +271,11 @@ defmodule DocPointers.Store do
   defp legacy_json_path(state), do: Path.join([state.root, "docs", "doc-pointer-db.json"])
 
   defp load_all_pointers(state) do
-    state.root
-    |> Path.join("**/.meta/pointers.yaml")
-    |> Path.wildcard(match_dot: true)
-    |> Enum.reject(&(&1 |> Path.dirname() |> ignored_dir?()))
+    # Check the yaml only where a store can exist: the root plus each
+    # detected store. Never glob the whole tree.
+    ["" | state.submodules]
+    |> Enum.map(&pointers_path(state, &1))
+    |> Enum.filter(&File.exists?/1)
     |> Enum.reduce(state, fn path, acc ->
       rel = Path.relative_to(path, acc.root)
       store_key = resolve_store_key(acc.submodules, rel)
