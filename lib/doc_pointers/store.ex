@@ -171,7 +171,11 @@ defmodule DocPointers.Store do
   # trees); `git submodule foreach --recursive` takes seconds and yields
   # root-relative paths for nested submodules.
   defp detect_submodules(root) do
-    case System.cmd("git", ~w(submodule foreach --recursive --quiet echo $displaypath),
+    # The command must be ONE argv element: git only shell-evaluates a
+    # single-argument foreach command, so split args leave $displaypath literal.
+    case System.cmd(
+           "git",
+           ["submodule", "foreach", "--recursive", "--quiet", "echo $displaypath"],
            cd: root,
            stderr_to_stdout: true
          ) do
