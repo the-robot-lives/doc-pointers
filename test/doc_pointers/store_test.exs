@@ -102,7 +102,7 @@ defmodule DocPointers.StoreTest do
 
     test "pagination" do
       for i <- 1..5 do
-        token_char = <<(0x13000 + i)::utf8>>
+        token_char = <<0x13000 + i::utf8>>
         token = String.duplicate(token_char, 4)
         Store.put(make_pointer("page-#{i}", token))
       end
@@ -130,14 +130,15 @@ defmodule DocPointers.StoreTest do
       docs_dir = Path.join(root, "docs")
       File.mkdir_p!(docs_dir)
 
-      json = Jason.encode!(%{
-        "𓀀𓀻𓃉𓏦" => %{
-          "path" => "lib/auth.ex",
-          "line" => 42,
-          "name" => "login",
-          "description" => "auto-generated pointer"
-        }
-      })
+      json =
+        Jason.encode!(%{
+          "𓀀𓀻𓃉𓏦" => %{
+            "path" => "lib/auth.ex",
+            "line" => 42,
+            "name" => "login",
+            "description" => "auto-generated pointer"
+          }
+        })
 
       File.write!(Path.join(docs_dir, "doc-pointer-db.json"), json)
 
@@ -149,6 +150,155 @@ defmodule DocPointers.StoreTest do
       assert imported != nil
       assert imported.file_path == "lib/auth.ex"
       assert imported.function == "login"
+    end
+  end
+
+  describe "nested submodule stores" do
+    test "loads a nested .meta/pointers.yaml from its own folder", %{root: root} do
+      sub = Path.join([root, "Portfolio", "Libs", "ai", "genai"])
+      File.mkdir_p!(Path.join(sub, ".meta"))
+
+      {:ok, yaml} =
+        Ymlr.document(%{
+          "pointers" => %{
+            "nested-1" => %{
+              "token" => "𓀀𓀻𓃉𓏦",
+              "file_path" => "lib/nested.ex",
+              "function" => "nested_fn",
+              "description" => "nested pointer"
+            }
+          }
+        })
+
+      File.write!(Path.join([sub, ".meta", "pointers.yaml"]), yaml)
+
+      # nested checkout acts as its own store even without a .gitmodules entry
+      File.mkdir_p!(Path.join(sub, ".git"))
+      Store.set_root(root)
+
+      nested = Enum.find(Store.all(), fn p -> p.uuid == "nested-1" end)
+      assert nested.file_path == "lib/nested.ex"
+    end
+
+    test "ignores git repos and yamls inside deps/node_modules/_build", %{root: root} do
+      vendored = Path.join([root, "deps", "vendored"])
+      File.mkdir_p!(Path.join(vendored, ".git"))
+
+      node_mod = Path.join([root, "sub", "node_modules", "pkg"])
+      File.mkdir_p!(Path.join(node_mod, ".git"))
+
+      Store.set_root(root)
+
+      # a vendored repo must not become a store: pointer routes to root yaml
+      Store.put(make_pointer("vendored-1", "𓀀𓀻𓃉𓏦", file_path: "deps/vendored/lib/x.ex"))
+      {:ok, data} = YamlElixir.read_from_file(Path.join([root, ".meta", "pointers.yaml"]))
+      assert Map.has_key?(data["pointers"], "vendored-1")
+      assert Store.get("vendored-1").file_path == "deps/vendored/lib/x.ex"
+      refute File.exists?(Path.join([vendored, ".meta", "pointers.yaml"]))
+
+      Store.put(make_pointer("nm-1", "𓳔𔐮𔘟𔄵", file_path: "sub/node_modules/pkg/lib/y.ex"))
+      {:ok, data} = YamlElixir.read_from_file(Path.join([root, ".meta", "pointers.yaml"]))
+      assert Map.has_key?(data["pointers"], "nm-1")
+      refute File.exists?(Path.join([node_mod, ".meta", "pointers.yaml"]))
+    end
+
+    test "saves new submodule pointer into submodule store", %{root: root} do
+      sub = Path.join(root, "sub")
+      File.mkdir_p!(Path.join(sub, ".git"))
+      Store.set_root(root)
+
+      Store.put(make_pointer("sub-1", "𓀀𓀻𓃉𓏦", file_path: "sub/lib/x.ex"))
+
+      assert File.exists?(Path.join([sub, ".meta", "pointers.yaml"]))
+      refute File.exists?(Path.join([root, ".meta", "pointers.yaml"]))
+    end
+
+    test "update relocates pointer across store boundary", %{root: root} do
+      sub = Path.join(root, "sub")
+      File.mkdir_p!(Path.join(sub, ".git"))
+      Store.set_root(root)
+
+      Store.put(make_pointer("mover", "𓀀𓀻𓃉𓏦"))
+
+      {:ok, _} = Store.update("mover", %{file_path: "sub/lib/moved.ex"})
+
+      assert Store.get("mover").file_path == "lib/moved.ex"
+      assert File.exists?(Path.join([sub, ".meta", "pointers.yaml"]))
+      {:ok, data} = YamlElixir.read_from_file(Path.join([root, ".meta", "pointers.yaml"]))
+      assert data["pointers"] == %{}
+    end
+  end
+
+  describe "git superproject detection" do
+    test "routes pointers into a nested registered submodule", %{root: root} do
+      git = fn args, dir ->
+        {out, 0} =
+          System.cmd("git", ["-c", "protocol.file.allow=always" | args],
+            cd: dir,
+            stderr_to_stdout: true,
+            env: [
+              {"GIT_AUTHOR_NAME", "t"},
+              {"GIT_AUTHOR_EMAIL", "t@t"},
+              {"GIT_COMMITTER_NAME", "t"},
+              {"GIT_COMMITTER_EMAIL", "t@t"}
+            ]
+          )
+
+        out
+      end
+
+      origin = Path.join(Path.dirname(root), Path.basename(root) <> "_origin")
+      File.mkdir_p!(origin)
+      on_exit(fn -> File.rm_rf!(origin) end)
+      git.(["init", "-q"], origin)
+      File.write!(Path.join(origin, "README"), "x")
+      git.(["add", "."], origin)
+      git.(["commit", "-qm", "init"], origin)
+
+      git.(["init", "-q"], root)
+      git.(["submodule", "add", "-q", origin, "libs/nested"], root)
+
+      Store.set_root(root)
+      Store.put(make_pointer("git-1", "𓀀𓀻𓃉𓏦", file_path: "libs/nested/lib/a.ex"))
+
+      assert Store.get("git-1").file_path == "lib/a.ex"
+      assert File.exists?(Path.join([root, "libs", "nested", ".meta", "pointers.yaml"]))
+      refute File.exists?(Path.join([root, ".meta", "pointers.yaml"]))
+    end
+  end
+
+  describe "migrate" do
+    test "moves root-store pointers into owning submodule stores", %{root: root} do
+      sub = Path.join(root, "sub")
+      File.mkdir_p!(Path.join(sub, ".git"))
+      File.mkdir_p!(Path.join(root, ".meta"))
+
+      # legacy-style root-store entry pointing into a submodule
+      {:ok, yaml} =
+        Ymlr.document(%{
+          "pointers" => %{
+            "legacy-1" => %{
+              "token" => "𓀀𓀻𓃉𓏦",
+              "file_path" => "sub/lib/legacy.ex",
+              "function" => "legacy_fn",
+              "description" => "legacy pointer"
+            }
+          }
+        })
+
+      File.write!(Path.join([root, ".meta", "pointers.yaml"]), yaml)
+
+      Store.set_root(root)
+      assert Store.get("legacy-1").file_path == "sub/lib/legacy.ex"
+
+      %{moved: moved} = Store.migrate()
+
+      assert moved == 1
+      assert Store.get("legacy-1").file_path == "lib/legacy.ex"
+      assert File.exists?(Path.join([sub, ".meta", "pointers.yaml"]))
+
+      {:ok, data} = YamlElixir.read_from_file(Path.join([root, ".meta", "pointers.yaml"]))
+      refute Map.has_key?(data["pointers"], "legacy-1")
     end
   end
 

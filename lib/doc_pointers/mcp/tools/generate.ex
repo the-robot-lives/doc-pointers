@@ -74,7 +74,8 @@ defmodule DocPointers.MCP.Tools.Generate do
              DocPointers.Hieroglyph.declaration(token, args.function_name, args.description),
            file_path: args.file_path,
            function: args.function_name,
-           class: args[:class]
+           class: args[:class],
+           description: args[:description]
          }}
 
       {:error, :max_attempts} ->

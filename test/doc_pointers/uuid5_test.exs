@@ -45,7 +45,9 @@ defmodule DocPointers.UUID5Test do
 
     test "produces lowercase hyphenated format" do
       uuid_string = UUID5.to_string(UUID5.generate("format-test"))
-      assert uuid_string =~ ~r/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+
+      assert uuid_string =~
+               ~r/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
     end
   end
 

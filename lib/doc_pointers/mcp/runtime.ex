@@ -41,6 +41,7 @@ defmodule DocPointers.MCP.Runtime do
 
   def start_stdio! do
     Logger.configure(level: :warning)
+    force_byte_mode_stdio()
 
     {:ok, _pid} =
       Supervisor.start_link([{DocPointers.MCP, transport: :stdio}],
@@ -49,6 +50,25 @@ defmodule DocPointers.MCP.Runtime do
       )
 
     :ok
+  end
+
+  # JSON-RPC is UTF-8 on the wire, and Jason owns all encoding. The BEAM's
+  # standard-io device, however, follows the host locale: under a UTF-8
+  # locale, IO.binwrite re-encodes latin1-interpreted binaries (hieroglyph
+  # tokens leave double-encoded) and IO.binread stalls on multibyte lines
+  # (token-keyed lookups hang until the client times out). Forcing the device
+  # into binary + latin1 makes both directions raw byte passthrough; the JSON
+  # layer never sees the difference. Idempotent; failures are non-fatal
+  # (e.g. no group leader under some test harnesses).
+  defp force_byte_mode_stdio do
+    try do
+      :io.setopts(:standard_io, [{:binary, true}, {:encoding, :latin1}])
+      :ok
+    rescue
+      _ -> :ok
+    catch
+      _, _ -> :ok
+    end
   end
 
   def start_http!(port) do
