@@ -229,6 +229,44 @@ defmodule DocPointers.StoreTest do
     end
   end
 
+  describe "git superproject detection" do
+    test "routes pointers into a nested registered submodule", %{root: root} do
+      git = fn args, dir ->
+        {out, 0} =
+          System.cmd("git", ["-c", "protocol.file.allow=always" | args],
+            cd: dir,
+            stderr_to_stdout: true,
+            env: [
+              {"GIT_AUTHOR_NAME", "t"},
+              {"GIT_AUTHOR_EMAIL", "t@t"},
+              {"GIT_COMMITTER_NAME", "t"},
+              {"GIT_COMMITTER_EMAIL", "t@t"}
+            ]
+          )
+
+        out
+      end
+
+      origin = Path.join(Path.dirname(root), Path.basename(root) <> "_origin")
+      File.mkdir_p!(origin)
+      on_exit(fn -> File.rm_rf!(origin) end)
+      git.(["init", "-q"], origin)
+      File.write!(Path.join(origin, "README"), "x")
+      git.(["add", "."], origin)
+      git.(["commit", "-qm", "init"], origin)
+
+      git.(["init", "-q"], root)
+      git.(["submodule", "add", "-q", origin, "libs/nested"], root)
+
+      Store.set_root(root)
+      Store.put(make_pointer("git-1", "𓀀𓀻𓃉𓏦", file_path: "libs/nested/lib/a.ex"))
+
+      assert Store.get("git-1").file_path == "lib/a.ex"
+      assert File.exists?(Path.join([root, "libs", "nested", ".meta", "pointers.yaml"]))
+      refute File.exists?(Path.join([root, ".meta", "pointers.yaml"]))
+    end
+  end
+
   describe "migrate" do
     test "moves root-store pointers into owning submodule stores", %{root: root} do
       sub = Path.join(root, "sub")
