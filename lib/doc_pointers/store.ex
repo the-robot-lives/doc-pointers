@@ -8,11 +8,14 @@ defmodule DocPointers.Store do
     GenServer.start_link(__MODULE__, root, name: __MODULE__)
   end
 
-  def set_root(root), do: GenServer.call(__MODULE__, {:set_root, root})
+  # Monorepo-scale recursive scans can take well over the default 5s.
+  @scan_timeout 120_000
+
+  def set_root(root), do: GenServer.call(__MODULE__, {:set_root, root}, @scan_timeout)
   def get(uuid), do: GenServer.call(__MODULE__, {:get, uuid})
   def get_by_token(token), do: GenServer.call(__MODULE__, {:get_by_token, token})
   def put(pointer), do: GenServer.call(__MODULE__, {:put, pointer})
-  def migrate, do: GenServer.call(__MODULE__, :migrate)
+  def migrate, do: GenServer.call(__MODULE__, :migrate, @scan_timeout)
   def update(uuid, updates), do: GenServer.call(__MODULE__, {:update, uuid, updates})
   def all, do: GenServer.call(__MODULE__, :all)
   def token_exists?(token), do: GenServer.call(__MODULE__, {:token_exists?, token})
