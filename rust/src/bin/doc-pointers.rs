@@ -1402,7 +1402,10 @@ fn legacy_records(db_path: &Path) -> Result<HashMap<String, Pointer>, String> {
         pointers.insert(
             code.clone(),
             Pointer {
-                uuid: None,
+                uuid: Some(Uuid::new_v5(
+                    &DOC_POINTER_NAMESPACE,
+                    uuid5_name(name, "", 0).as_bytes(),
+                )),
                 code: code.clone(),
                 path: path.to_string(),
                 line: data.get("line").and_then(Value::as_u64).unwrap_or(0) as usize,
@@ -1440,11 +1443,13 @@ fn reconcile_records(
     let known: HashSet<String> = backend_status(root)?.into_iter().map(|p| p.code).collect();
     let mut records = legacy_records(db_path)?;
     records.retain(|code, _| !known.contains(code));
-    records.extend(
-        scanned
-            .iter()
-            .map(|(code, pointer)| (code.clone(), pointer.clone())),
-    );
+    for (code, pointer) in scanned {
+        let mut pointer = pointer.clone();
+        if pointer.uuid.is_none() && !known.contains(code) {
+            pointer.uuid = records.get(code).and_then(|legacy| legacy.uuid);
+        }
+        records.insert(code.clone(), pointer);
+    }
     let mut entries: Vec<_> = records.into_iter().collect();
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(entries
@@ -1820,6 +1825,24 @@ mod tests {
             .map(|c| format!("U+{:X}", c as u32))
             .collect();
         assert_eq!(codepoints.join(" "), "U+13CD4 U+1442E U+1461F U+14135");
+    }
+
+    #[test]
+    fn legacy_record_keeps_uuid5_identity() {
+        let root = env::temp_dir().join(format!("doc-pointers-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(root.join("docs")).unwrap();
+        let db = root.join(DEFAULT_DB_PATH);
+        fs::write(
+            &db,
+            r#"{"ABCD":{"path":"docs/old.md","name":"legacy","description":"old"}}"#,
+        )
+        .unwrap();
+        let pointer = legacy_records(&db).unwrap().remove("ABCD").unwrap();
+        assert_eq!(
+            pointer.uuid,
+            Some(Uuid::new_v5(&DOC_POINTER_NAMESPACE, b"doc-pointers:legacy"))
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
