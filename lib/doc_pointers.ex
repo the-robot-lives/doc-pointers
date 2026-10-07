@@ -7,7 +7,7 @@ defmodule DocPointers do
   programmatic API.
   """
 
-  alias DocPointers.{UUID5, Hieroglyph, Pointer, Store}
+  alias DocPointers.{UUID5, Hieroglyph, Marker, Pointer, Store}
 
   @doc """
   Generate a new doc-pointer for a source location.
@@ -18,15 +18,22 @@ defmodule DocPointers do
     line = Keyword.get(opts, :line)
     salt = Keyword.get(opts, :salt)
     name_override = Keyword.get(opts, :name_override)
+    kind = Keyword.get(opts, :kind, "🔧")
 
     base_name = name_override || UUID5.build_annotation_name(file_path, function_name)
 
-    case find_unique_token(base_name, salt, 0) do
+    result =
+      if Marker.valid_kind?(kind),
+        do: find_unique_token(base_name, salt, 0),
+        else: {:error, :invalid_kind}
+
+    case result do
       {:ok, uuid_string, token} ->
         pointer =
           Pointer.new(%{
             uuid: uuid_string,
             token: token,
+            kind: kind,
             file_path: file_path,
             class: class,
             function: function_name,

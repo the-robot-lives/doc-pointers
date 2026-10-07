@@ -2,7 +2,7 @@
 
 **Repo:** https://github.com/the-robot-lives/doc-pointers
 
-Mint durable, code-stable citations for a source locus: a **UUIDv5** identity plus a **4-glyph hieroglyph token** you can paste into docs. Line numbers rot; `⟦𓳔𔐮𔘟𔄵⟧` does not.
+Mint durable, code-stable citations for a source locus with a **UUIDv5** identity. Source markers use `〚🔧:550e8400-e29b-51d4-a716-446655440000〛`; existing 4-glyph hieroglyph tokens remain lookup aliases.
 
 ## What
 
@@ -17,6 +17,16 @@ Default MCP tools are read-only (`doc-pointer/lookup`, `doc-pointer/list`); `gen
 ## Why
 
 Docs that cite `file:line` go stale the moment code moves. A doc-pointer is an identity for a *locus* that survives refactors — the token resolves to the code wherever it lives now. Part of the Noizu NPL dev-tooling MCP family (the same review/memory surfaces that consume doc-pointers).
+
+## Marker grammar
+
+An opening marker is `〚{emoji}:{lowercase UUIDv5}〛`. `📁` means file, `📦` means module/class/struct, `🔌` means interface/protocol/behavior contract, `🧩` means a cross-cutting component, `🔧` means function, `🔀` means logic region, and `📐` means a Mermaid or PlantUML diagram. An opening marker may be followed by `Name :: Description`.
+
+Components, logic regions, and diagrams can close with `〚/{same emoji}:{same UUID}〛`. The closing type and UUID must match the opening marker. A component UUID can recur in multiple noncontiguous spans, including different files; the store keeps one identity and a `locations` array of source spans (`file_path`, optional `line` and `end_line`). Other kinds have one anchor. Nested or overlapping components are valid.
+
+The legacy `⟦four glyphs⟧` form remains readable for existing citations; new markers use the typed UUID form. New deep links may use `?pointer=UUID`; existing `?code=⟦TOKEN⟧` links remain valid for consumers that support them.
+
+`doc-pointer/lookup` accepts a plain UUID, `emoji:UUID`, a full typed marker, or a legacy glyph marker. It returns metadata and bounded source snippets. A component lookup returns one snippet for each stored occurrence; missing files appear as a per-occurrence error.
 
 ## Getting Started
 

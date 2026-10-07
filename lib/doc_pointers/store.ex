@@ -44,7 +44,7 @@ defmodule DocPointers.Store do
       fingerprint: nil
     }
 
-    state = reload(state)
+    state = state |> reload() |> maybe_load_legacy_locked()
     {:ok, state}
   end
 
@@ -63,7 +63,7 @@ defmodule DocPointers.Store do
         fingerprint: nil
     }
 
-    state = reload(state)
+    state = state |> reload() |> maybe_load_legacy_locked()
     {:reply, :ok, state}
   end
 
@@ -153,6 +153,10 @@ defmodule DocPointers.Store do
           |> maybe_update(:class, updates)
           |> maybe_update(:line, updates)
           |> maybe_update(:file_path, updates)
+          |> maybe_update(:kind, updates)
+          |> then(fn p ->
+            if Map.has_key?(updates, :kind), do: %{p | kind_explicit: true}, else: p
+          end)
           |> Map.put(:updated_at, now)
 
         # file_path is stored relative to its store; re-prefix before re-resolving
@@ -243,19 +247,42 @@ defmodule DocPointers.Store do
     do: {:reply, {:error, "records must be an array"}, state}
 
   defp reconcile_one(attrs, state) when is_map(attrs) do
-    token = attrs["token"]
+    requested_uuid = attrs["uuid"]
+    existing_by_uuid = state.pointers[requested_uuid]
+
+    token =
+      attrs["token"] ||
+        (existing_by_uuid && existing_by_uuid.token) ||
+        token_from_uuid(requested_uuid)
+
     file_path = attrs["file_path"]
     function = attrs["function"]
     description = attrs["description"]
-    requested_uuid = attrs["uuid"]
+    kind = attrs["kind"] || (existing_by_uuid && existing_by_uuid.kind) || "🔧"
+    owner = state.store_membership[requested_uuid] || ""
+
+    locations =
+      attrs["locations"] ||
+        (existing_by_uuid && public_locations(existing_by_uuid.locations, owner)) || []
+
+    attrs =
+      attrs |> Map.put("token", token) |> Map.put("kind", kind) |> Map.put("locations", locations)
 
     cond do
       not (is_binary(token) and String.length(token) == 4) ->
         {:error, "record token must contain exactly four glyphs"}
 
-      not (is_binary(file_path) and file_path != "" and
-             Path.type(file_path) == :relative and
-               not Enum.member?(Path.split(file_path), "..")) ->
+      not DocPointers.Marker.valid_kind?(kind) ->
+        {:error, "record kind must be one of 📁, 📦, 🔌, 🧩, 🔧, 🔀, 📐"}
+
+      not valid_locations?(locations) ->
+        {:error,
+         "record locations must contain root-relative file_path and optional line/end_line"}
+
+      kind != "🧩" and length(locations) > 1 ->
+        {:error, "only component records may have multiple locations"}
+
+      not valid_relative_path?(file_path) ->
         {:error, "record file_path must be relative to the root"}
 
       not (is_binary(function) and function != "") ->
@@ -275,6 +302,13 @@ defmodule DocPointers.Store do
   defp reconcile_one(_attrs, _state), do: {:error, "each record must be an object"}
 
   defp reconcile_valid(attrs, state) do
+    attrs =
+      Map.update!(attrs, "locations", fn locations ->
+        Enum.sort_by(locations, fn location ->
+          {location["file_path"], location["line"] || 0, location["end_line"] || 0}
+        end)
+      end)
+
     token = attrs["token"]
     existing_uuid = state.token_index[token]
     requested_uuid = attrs["uuid"]
@@ -303,6 +337,9 @@ defmodule DocPointers.Store do
               | file_path: attrs["file_path"],
                 function: attrs["function"],
                 description: attrs["description"],
+                kind: attrs["kind"],
+                kind_explicit: true,
+                locations: attrs["locations"],
                 line: Map.get(attrs, "line", existing.line),
                 class: Map.get(attrs, "class", existing.class)
             }
@@ -313,6 +350,8 @@ defmodule DocPointers.Store do
               file_path: attrs["file_path"],
               function: attrs["function"],
               description: attrs["description"],
+              kind: attrs["kind"],
+              locations: attrs["locations"],
               line: attrs["line"],
               class: attrs["class"]
             })
@@ -345,9 +384,49 @@ defmodule DocPointers.Store do
       pointer
       |> Pointer.to_map()
       |> Map.put("uuid", uuid)
+      |> Map.put("kind", pointer.kind)
       |> Map.put("file_path", file_path)
+      |> Map.put("locations", public_locations(pointer.locations, owner))
     end)
     |> Enum.sort_by(& &1["uuid"])
+  end
+
+  defp token_from_uuid(uuid) when is_binary(uuid) do
+    if DocPointers.Marker.valid_uuid?(uuid) do
+      uuid |> DocPointers.UUID5.from_string() |> DocPointers.Hieroglyph.encode()
+    end
+  end
+
+  defp token_from_uuid(_), do: nil
+
+  defp valid_locations?(locations) when is_list(locations) do
+    Enum.all?(locations, fn
+      %{"file_path" => path} = location ->
+        valid_relative_path?(path) and
+          valid_line?(Map.get(location, "line")) and
+          valid_line?(Map.get(location, "end_line")) and
+          (is_nil(location["end_line"]) or is_nil(location["line"]) or
+             location["end_line"] >= location["line"])
+
+      _ ->
+        false
+    end)
+  end
+
+  defp valid_locations?(_), do: false
+
+  defp valid_line?(nil), do: true
+  defp valid_line?(line), do: is_integer(line) and line > 0
+
+  defp valid_relative_path?(path),
+    do:
+      is_binary(path) and path != "" and Path.type(path) == :relative and
+        not Enum.member?(Path.split(path), "..")
+
+  defp public_locations(locations, owner) do
+    Enum.map(locations || [], fn location ->
+      Map.update!(location, "file_path", &prefix_path(owner, &1))
+    end)
   end
 
   # -- Store detection --
@@ -447,12 +526,21 @@ defmodule DocPointers.Store do
   defp resolve_store_key(_submodules, _), do: ""
 
   defp resolve_and_adjust(state, %Pointer{} = pointer) do
-    store_key = resolve_store_key(state.submodules, pointer.file_path)
+    store_key =
+      if pointer.kind == "🧩", do: "", else: resolve_store_key(state.submodules, pointer.file_path)
 
     adjusted =
       if store_key != "" and pointer.file_path do
         prefix = store_key <> "/"
-        %{pointer | file_path: String.replace_prefix(pointer.file_path, prefix, "")}
+
+        %{
+          pointer
+          | file_path: String.replace_prefix(pointer.file_path, prefix, ""),
+            locations:
+              Enum.map(pointer.locations || [], fn location ->
+                Map.update!(location, "file_path", &String.replace_prefix(&1, prefix, ""))
+              end)
+        }
       else
         pointer
       end
@@ -569,7 +657,16 @@ defmodule DocPointers.Store do
       store_key = resolve_store_key(acc.submodules, rel)
       load_from_yaml(acc, store_key, path)
     end)
-    |> maybe_load_legacy()
+  end
+
+  defp maybe_load_legacy_locked(state) do
+    if not Application.get_env(:doc_pointers, :skip_legacy_import, false) and
+         map_size(state.pointers) == 0 and File.exists?(legacy_json_path(state)) do
+      with_lock(state, &maybe_load_legacy/1)
+      |> then(fn {:reply, :ok, next} -> next end)
+    else
+      state
+    end
   end
 
   defp load_from_yaml(state, store_key, path) do
@@ -592,9 +689,9 @@ defmodule DocPointers.Store do
          map_size(state.pointers) == 0 and File.exists?(legacy) do
       state = import_legacy_json(state)
       state.store_membership |> Map.values() |> Enum.uniq() |> Enum.each(&save_store(state, &1))
-      state
+      {:reply, :ok, %{state | fingerprint: store_fingerprint(state)}}
     else
-      state
+      {:reply, :ok, state}
     end
   end
 
