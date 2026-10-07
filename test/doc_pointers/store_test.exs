@@ -152,11 +152,13 @@ defmodule DocPointers.StoreTest do
       assert imported.function == "login"
     end
 
-    test "keeps every record when legacy names repeat", %{root: root} do
+    test "keeps every record when legacy keys repeat", %{root: root} do
       docs_dir = Path.join(root, "docs")
       File.mkdir_p!(docs_dir)
 
       entries = %{
+        # Same name in different files: distinct {path}::{name} keys, so each
+        # derives its own uuid (no longer treated as a collision).
         "𓀀𓀻𓃉𓏦" => %{"path" => "lib/a.ex", "name" => "login", "description" => "first"},
         "𓳔𔐮𔘟𔄵" => %{"path" => "lib/b.ex", "name" => "login", "description" => "second"},
         "𓃉𓏦𓀀𓀻" => %{"path" => "lib/c.ex", "name" => "unique", "description" => "third"}
@@ -168,25 +170,49 @@ defmodule DocPointers.StoreTest do
       assert length(Store.all()) == 3
       records = Store.snapshot().records
 
-      for token <- ["𓀀𓀻𓃉𓏦", "𓳔𔐮𔘟𔄵"] do
+      for {token, data} <- entries do
         expected =
-          "doc-pointers:legacy-token:#{token}"
+          data["path"]
+          |> DocPointers.UUID5.build_annotation_name(data["name"])
           |> DocPointers.UUID5.generate()
           |> DocPointers.UUID5.to_string()
 
         assert Enum.any?(records, &(&1["token"] == token and &1["uuid"] == expected))
       end
 
-      unique_uuid =
-        "unique"
-        |> DocPointers.UUID5.build_name()
-        |> DocPointers.UUID5.generate()
-        |> DocPointers.UUID5.to_string()
+      # A key that still repeats within one file binds its uuid to the token.
+      # Fresh root so the earlier import's yaml doesn't merge in.
+      dup_root =
+        System.tmp_dir!() |> Path.join("doc_pointers_test_dup_#{:rand.uniform(100_000)}")
 
-      assert Enum.any?(records, &(&1["token"] == "𓃉𓏦𓀀𓀻" and &1["uuid"] == unique_uuid))
+      File.mkdir_p!(Path.join(dup_root, "docs"))
+      on_exit(fn -> File.rm_rf!(dup_root) end)
 
-      {:ok, yaml} = YamlElixir.read_from_file(Path.join([root, ".meta", "pointers.yaml"]))
-      assert map_size(yaml["pointers"]) == 3
+      dup_entries = %{
+        "𓀀𓀻𓃉𓏦" => %{"path" => "lib/d.ex", "name" => "twin", "description" => "first"},
+        "𓳔𔐮𔘟𔄵" => %{"path" => "lib/d.ex", "name" => "twin", "description" => "second"}
+      }
+
+      File.write!(
+        Path.join([dup_root, "docs", "doc-pointer-db.json"]),
+        Jason.encode!(dup_entries)
+      )
+
+      Store.set_root(dup_root)
+
+      dup_records = Store.snapshot().records
+
+      for token <- ["𓀀𓀻𓃉𓏦", "𓳔𔐮𔘟𔄵"] do
+        expected =
+          "doc-pointers:legacy-token:#{token}"
+          |> DocPointers.UUID5.generate()
+          |> DocPointers.UUID5.to_string()
+
+        assert Enum.any?(dup_records, &(&1["token"] == token and &1["uuid"] == expected))
+      end
+
+      {:ok, yaml} = YamlElixir.read_from_file(Path.join([dup_root, ".meta", "pointers.yaml"]))
+      assert map_size(yaml["pointers"]) == 2
     end
   end
 

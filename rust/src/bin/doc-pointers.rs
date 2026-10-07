@@ -63,15 +63,92 @@ struct ScanOptions {
 /// Root-relative subtree scoping for scans. Empty `include` means the whole root.
 /// A directory is entered when it could contain an included path; a file matches
 /// when it sits under an included prefix and under no excluded prefix.
+/// `--exclude` accepts plain prefixes (`utilities/vendored`) or globs relative
+/// to the root (`**/generated/**`, `src/*.gen.ex`). Default excludes always
+/// apply: worktree and staging duplicates hold no stores of their own and
+/// previously produced thousands of phantom records in the monorepo.
 #[derive(Debug, Default, Clone)]
 struct ScanFilter {
     include: Vec<PathBuf>,
     exclude: Vec<PathBuf>,
 }
 
+/// Default-excluded path segments: `.claude/worktrees` and the legacy worktree
+/// placements (`.worktrees/`, `<repo>.worktrees/`) plus nested `staging/` trees.
+fn default_excluded(rel: &Path) -> bool {
+    let names: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    names.iter().enumerate().any(|(index, name)| {
+        name == "staging"
+            || name == ".worktrees"
+            || name.ends_with(".worktrees")
+            || (name == "worktrees" && index > 0 && names[index - 1] == ".claude")
+    })
+}
+
+/// A pattern without glob metacharacters keeps the historical prefix semantics;
+/// patterns with `*`/`?` are matched as root-relative globs.
+fn pattern_matches(pattern: &str, rel: &str) -> bool {
+    if !pattern.contains('*') && !pattern.contains('?') {
+        return rel == pattern || rel.starts_with(&format!("{pattern}/"));
+    }
+    glob_match(pattern, rel)
+}
+
+fn glob_match(pattern: &str, path: &str) -> bool {
+    let pat: Vec<&str> = pattern.split('/').filter(|s| !s.is_empty()).collect();
+    let seg: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    glob_segments(&pat, &seg)
+}
+
+fn glob_segments(pat: &[&str], seg: &[&str]) -> bool {
+    match pat.split_first() {
+        None => seg.is_empty(),
+        // `**` spans zero or more whole path segments.
+        Some((&"**", rest)) => (0..=seg.len()).any(|skip| glob_segments(rest, &seg[skip..])),
+        Some((head, rest)) => match seg.split_first() {
+            Some((path_head, path_rest)) => {
+                segment_match(head, path_head) && glob_segments(rest, path_rest)
+            }
+            None => false,
+        },
+    }
+}
+
+fn segment_match(pat: &str, text: &str) -> bool {
+    let pat: Vec<char> = pat.chars().collect();
+    let text: Vec<char> = text.chars().collect();
+    segment_match_chars(&pat, &text)
+}
+
+fn segment_match_chars(pat: &[char], text: &[char]) -> bool {
+    match pat.split_first() {
+        None => text.is_empty(),
+        Some(('*', rest)) => (0..=text.len()).any(|skip| segment_match_chars(rest, &text[skip..])),
+        Some((head, rest)) => match text.split_first() {
+            Some((text_head, text_rest)) if head == text_head || *head == '?' => {
+                segment_match_chars(rest, text_rest)
+            }
+            _ => false,
+        },
+    }
+}
+
 impl ScanFilter {
+    fn excluded(&self, rel: &Path) -> bool {
+        if default_excluded(rel) {
+            return true;
+        }
+        let rel_str = rel.to_string_lossy();
+        self.exclude
+            .iter()
+            .any(|e| pattern_matches(&e.to_string_lossy(), &rel_str))
+    }
+
     fn allows_dir(&self, rel: &Path) -> bool {
-        if self.exclude.iter().any(|e| rel.starts_with(e)) {
+        if self.excluded(rel) {
             return false;
         }
         if self.include.is_empty() {
@@ -83,7 +160,7 @@ impl ScanFilter {
     }
 
     fn allows_file(&self, rel: &Path) -> bool {
-        if self.exclude.iter().any(|e| rel.starts_with(e)) {
+        if self.excluded(rel) {
             return false;
         }
         if self.include.is_empty() {
@@ -99,6 +176,7 @@ struct AnnotateOptions {
     db: String,
     write: bool,
     include_exs: bool,
+    force_remint: bool,
     filter: ScanFilter,
 }
 
@@ -1151,14 +1229,16 @@ fn elixir_new_doc_block(
     if let Some(summary) = summary.filter(|s| !s.is_empty()) {
         block.push(format!("{indent}{summary}\n"));
         if how.is_some() {
-            block.push(format!("{indent}\n"));
+            // Plain empty line: an indented blank separator is normalized away
+            // by `mix format`, which would break --check-formatted afterwards.
+            block.push("\n".to_string());
         }
     }
     if let Some(how) = how.filter(|h| !h.is_empty()) {
         block.push(format!("{indent}How: {how}\n"));
     }
     if block.len() > 1 {
-        block.push(format!("{indent}\n"));
+        block.push("\n".to_string());
     }
     block.push(format!("{indent}{marker_line}\n"));
     block.push(format!("{indent}\"\"\"\n"));
@@ -1179,20 +1259,22 @@ fn elixir_widen_single_line(line: &str, marker_line: &str) -> Vec<String> {
     if !body.is_empty() {
         block.push(format!("{indent}{body}\n"));
     }
-    block.push(format!("{indent}\n"));
+    block.push("\n".to_string());
     block.push(format!("{indent}{marker_line}\n"));
     block.push(format!("{indent}\"\"\"\n"));
     block
 }
 
-/// Lines inserted just before a heredoc's closing `"""`: a blank line and the
-/// marker, at the closer's indent so heredoc unindenting keeps both.
+/// Lines inserted just before a heredoc's closing `"""`: a plain empty line and
+/// the marker, at the closer's indent so heredoc unindenting keeps the marker.
+/// The separator stays truly empty — an indented blank line is normalized away
+/// by `mix format`, which would break --check-formatted afterwards.
 fn elixir_heredoc_marker_lines(close_line: &str, marker_line: &str) -> Vec<String> {
     let indent: String = close_line
         .chars()
         .take_while(|c| c.is_whitespace())
         .collect();
-    vec![format!("{indent}\n"), format!("{indent}{marker_line}\n")]
+    vec!["\n".to_string(), format!("{indent}{marker_line}\n")]
 }
 
 fn indent_of(line: &str) -> String {
@@ -1551,8 +1633,14 @@ fn annotate_command(args: &[String]) -> Result<(), String> {
             let head = lines[idx];
             let indent = indent_of(head);
             let seed = format!("{relpath}::{name}");
-            let (code, uuid, _uuid_name, _attempt) =
-                generate_uuid5_code(&seed, DOC_POINTER_NAMESPACE, "", &pointers)?;
+            let (code, uuid) = resolve_annotate_pointer(
+                &seed,
+                &relpath,
+                &name,
+                &pointers,
+                &minted,
+                options.force_remint,
+            )?;
             minted.insert(code.clone(), uuid);
             // Fresh markers are token-form; index them so the closing build's
             // re-collect resolves them without a store round-trip.
@@ -1744,6 +1832,7 @@ fn parse_annotate_options(args: &[String]) -> Result<AnnotateOptions, String> {
         db: DEFAULT_DB_PATH.to_string(),
         write: false,
         include_exs: false,
+        force_remint: false,
         filter: ScanFilter::default(),
     };
 
@@ -1776,6 +1865,7 @@ fn parse_annotate_options(args: &[String]) -> Result<AnnotateOptions, String> {
                     .exclude
                     .push(PathBuf::from(expect_value(args, index, "--exclude")?));
             }
+            "--force-remint" => options.force_remint = true,
             "--lang" => {
                 index += 1;
                 match expect_value(args, index, "--lang")? {
@@ -1803,7 +1893,7 @@ markers go into `@doc` docstrings (merged into existing ones, never stacked), mo
 get `@moduledoc`, and contracts (`defprotocol`/`defimpl`/`@callback`) plus `@doc false`\n\
 declarations get `#` comments. Dry-run by default; --write applies the insertions and\n\
 then reconciles .meta/pointers.yaml + expands deeplinks in the same run.\n\n\
-options:\n  --root ROOT       repository root, default: current directory\n  --db DB           deprecated; only docs/doc-pointer-db.json is accepted for migration\n  --include P       only scan/annotate under this root-relative prefix (repeatable)\n  --exclude P       skip this root-relative prefix (repeatable)\n  --lang exs        also annotate .exs scripts (skipped by default)\n  --write           apply insertions (otherwise dry-run report only)"
+options:\n  --root ROOT       repository root, default: current directory\n  --db DB           deprecated; only docs/doc-pointer-db.json is accepted for migration\n  --include P       only scan/annotate under this root-relative prefix (repeatable)\n  --exclude P       skip this root-relative prefix or glob, e.g. **/vendored/** (repeatable;\n                    worktree/staging duplicates are always excluded)\n  --force-remint    mint fresh tokens instead of reusing existing records for\n                    the same {{file}}::{{name}}\n  --lang exs        also annotate .exs scripts (skipped by default)\n  --write           apply insertions (otherwise dry-run report only)"
     );
 }
 
@@ -1986,7 +2076,7 @@ fn print_scan_help() {
 Reconcile doc pointer stores and expand deeplink: markdown links.\n\
 Run without --write/--check, this is a dry run: it reports how many\n\
 declarations it found and any errors, but changes nothing.\n\n\
-options:\n  --root ROOT       repository root, default: current directory\n  --db DB           deprecated; only docs/doc-pointer-db.json is accepted for migration\n  --write           reconcile stores and expand markdown deeplinks\n  --check           fail if writes would be needed (CI / pre-commit)"
+options:\n  --root ROOT       repository root, default: current directory\n  --db DB           deprecated; only docs/doc-pointer-db.json is accepted for migration\n  --include P       only scan under this root-relative prefix (repeatable)\n  --exclude P       skip this root-relative prefix or glob, e.g. **/vendored/** (repeatable;\n                    worktree/staging duplicates are always excluded)\n  --write           reconcile stores and expand markdown deeplinks\n  --check           fail if writes would be needed (CI / pre-commit)"
     );
 }
 
@@ -2014,15 +2104,77 @@ fn collect_pointers(
         let Ok(text) = fs::read_to_string(&path) else {
             continue;
         };
-        let mut in_fence = false;
+        let ext = path.extension().and_then(OsStr::to_str).unwrap_or("");
+        let is_md = ext == "md";
+        let is_elixir = ext == "ex" || ext == "exs";
+        let is_rust = ext == "rs";
+        // Fence/string state, per file:
+        // - .md: plain ``` fences hide their contents.
+        // - .ex/.exs: inside @doc/@moduledoc heredocs, ``` examples hide their
+        //   contents; markers outside those fences (how annotate inserts them)
+        //   still parse.
+        // - .rs: fenced examples in runs of `///` doc comments hide their
+        //   contents; `\`-continued string literals (help text, embedded
+        //   examples) carry string state across lines so marker-shaped tokens
+        //   inside them are not mistaken for real markers.
+        let mut md_fence = false;
+        let mut ex_in_doc = false;
+        let mut ex_doc_fence = false;
+        let mut rs_doc_fence = false;
+        let mut rs_prev_doc = false;
+        let mut rs_string_next = false;
         let mut spans: Vec<(MarkerKind, Uuid, String, usize)> = Vec::new();
         for (index, line) in text.lines().enumerate() {
-            if path.extension() == Some(OsStr::new("md")) && line.trim_start().starts_with("```") {
-                in_fence = !in_fence;
-                continue;
-            }
-            if in_fence {
-                continue;
+            let trimmed = line.trim_start();
+            if is_md {
+                if fence_toggle(trimmed) {
+                    md_fence = !md_fence;
+                }
+                if md_fence {
+                    continue;
+                }
+            } else {
+                if is_elixir {
+                    if ex_in_doc {
+                        if trimmed == "\"\"\"" {
+                            ex_in_doc = false;
+                        } else if fence_toggle(comment_body(trimmed)) {
+                            ex_doc_fence = !ex_doc_fence;
+                        }
+                    } else if (trimmed.starts_with("@doc") || trimmed.starts_with("@moduledoc"))
+                        && trimmed.ends_with("\"\"\"")
+                    {
+                        ex_in_doc = true;
+                    }
+                    if ex_in_doc && ex_doc_fence {
+                        continue;
+                    }
+                }
+                if is_rust {
+                    let is_doc = trimmed.starts_with("///") || trimmed.starts_with("//!");
+                    if rs_prev_doc && !is_doc {
+                        rs_doc_fence = false;
+                    }
+                    rs_prev_doc = is_doc;
+                    if is_doc && fence_toggle(comment_body(trimmed)) {
+                        rs_doc_fence = !rs_doc_fence;
+                    }
+                    if rs_doc_fence {
+                        continue;
+                    }
+                    let begins_in_string = rs_string_next;
+                    // Inside a Rust string literal every `"` is escaped, so a
+                    // line's unescaped-quote parity can only come from code
+                    // context. Carrying cumulative parity across lines keeps
+                    // multi-line string literals (plain or `\`-continued —
+                    // help text, embedded examples) from yielding phantom
+                    // pointers; a stray odd quote in a comment self-corrects
+                    // on the next even line.
+                    rs_string_next = begins_in_string != unescaped_quote_parity(line);
+                    if begins_in_string {
+                        continue;
+                    }
+                }
             }
             if let Some((kind, payload, closing, marker_end)) = parse_canonical_marker(line) {
                 // Token markers carry no UUID; resolve through the store index
@@ -2216,6 +2368,59 @@ fn parse_declaration(line: &str) -> Option<(String, String, String)> {
     Some((code.to_string(), name, clean_comment_tail(description)))
 }
 
+/// True when the line toggles a fenced code block. A fence that opens and
+/// closes on the same line does not change state.
+fn fence_toggle(trimmed: &str) -> bool {
+    if !trimmed.starts_with("```") {
+        return false;
+    }
+    let body = trimmed.trim_start_matches('`');
+    !(body.len() >= 3 && body.ends_with("```"))
+}
+
+/// Strip repeating line-comment prefixes so fence detection works on
+/// comment-wrapped examples (`/// ```rust`, `# ```elixir`).
+fn comment_body(trimmed: &str) -> &str {
+    const PREFIXES: [&str; 9] = ["////", "///", "//!", "<!--", "//", "/*", "--", "#", "*"];
+    let mut rest = trimmed;
+    loop {
+        match PREFIXES.iter().find(|prefix| rest.starts_with(**prefix)) {
+            Some(prefix) => rest = rest[prefix.len()..].trim_start(),
+            None => return rest,
+        }
+    }
+}
+
+/// Whether a line holds an odd number of string-delimiting `"` characters.
+/// Escapes consume the next char (`"\\"`, `"a\"b"`), `'"'` char literals are
+/// not delimiters, and comment lines never carry string state (doc comments
+/// quote examples freely). Used to carry Rust string state across lines so
+/// multi-line string literals (help text, embedded examples) don't yield
+/// phantom pointers.
+fn unescaped_quote_parity(line: &str) -> bool {
+    if line.trim_start().starts_with("//") {
+        return false;
+    }
+    let chars: Vec<char> = line.chars().collect();
+    let mut odd = false;
+    let mut index = 0;
+    while index < chars.len() {
+        match chars[index] {
+            '\\' => index += 2,
+            '"' => {
+                let prev = if index > 0 { chars[index - 1] } else { '\0' };
+                let next = chars.get(index + 1).copied().unwrap_or('\0');
+                if !(prev == '\'' && next == '\'') {
+                    odd = !odd;
+                }
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    odd
+}
+
 fn declaration_context_allows(line: &str, start: usize) -> bool {
     let prefix = &line[..start];
     // An odd number of unescaped double-quotes before the marker means it sits inside
@@ -2293,12 +2498,14 @@ fn scan_files(root: &Path, db_path: &Path, filter: &ScanFilter) -> Result<Vec<Pa
         "Temp",
         "UserSettings",
         "_build",
+        ".worktrees",
         "build",
         "coverage",
         "deps",
         "dist",
         "node_modules",
         "obj",
+        "staging",
         "target",
     ]
     .into_iter()
@@ -2509,10 +2716,12 @@ fn normalize_code(raw: &str) -> String {
 }
 
 fn expanded_target(pointer: &Pointer) -> String {
+    // Derivation key is `{path}::{name}` so same-named functions in different
+    // files never share a UUID.
     let uuid = pointer.uuid.unwrap_or_else(|| {
         Uuid::new_v5(
             &DOC_POINTER_NAMESPACE,
-            uuid5_name(&pointer.name, "", 0).as_bytes(),
+            uuid5_name(&format!("{}::{}", pointer.path, pointer.name), "", 0).as_bytes(),
         )
     });
     format!("{}:{}?pointer={uuid}", pointer.path, pointer.line)
@@ -2540,12 +2749,7 @@ fn legacy_records(db_path: &Path) -> Result<HashMap<String, Pointer>, String> {
         .ok_or_else(|| format!("legacy JSON {} must be an object", db_path.display()))?;
     let mut name_counts: HashMap<String, usize> = HashMap::new();
     for (code, data) in entries {
-        let name = data
-            .get("name")
-            .and_then(Value::as_str)
-            .filter(|name| !name.is_empty())
-            .unwrap_or(code);
-        *name_counts.entry(name.to_string()).or_default() += 1;
+        *name_counts.entry(legacy_key(code, data)).or_default() += 1;
     }
     let mut pointers = HashMap::new();
     for (code, data) in entries {
@@ -2558,11 +2762,12 @@ fn legacy_records(db_path: &Path) -> Result<HashMap<String, Pointer>, String> {
             .and_then(Value::as_str)
             .filter(|name| !name.is_empty())
             .unwrap_or(code);
-        // Legacy JSON has no UUID field. A name alone is ambiguous when the
-        // same function appears under multiple tokens, so bind those UUIDs to
-        // the stable token. Unique names retain their historical UUIDv5 value.
-        let uuid_name = if name_counts[name] == 1 {
-            uuid5_name(name, "", 0)
+        // Legacy JSON has no UUID field. The derivation key is `{path}::{name}`
+        // so same-named functions in different files stay distinct; a key that
+        // still repeats (same name twice in one file) binds its UUID to the
+        // stable token.
+        let uuid_name = if name_counts[&legacy_key(code, data)] == 1 {
+            uuid5_name(&format!("{path}::{name}"), "", 0)
         } else {
             format!("doc-pointers:legacy-token:{code}")
         };
@@ -2585,6 +2790,20 @@ fn legacy_records(db_path: &Path) -> Result<HashMap<String, Pointer>, String> {
         );
     }
     Ok(pointers)
+}
+
+/// Legacy ambiguity key: `{path}::{name}`, falling back to the token when the
+/// JSON entry has no usable name.
+fn legacy_key(code: &str, data: &Value) -> String {
+    let name = data
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(code);
+    format!(
+        "{}::{name}",
+        data.get("path").and_then(Value::as_str).unwrap_or("")
+    )
 }
 
 fn pointer_record(pointer: &Pointer) -> Value {
@@ -2640,7 +2859,8 @@ fn hydrate_pointer_ids(
                 .or_else(|| {
                     Some(Uuid::new_v5(
                         &DOC_POINTER_NAMESPACE,
-                        uuid5_name(&pointer.name, "", 0).as_bytes(),
+                        uuid5_name(&format!("{}::{}", pointer.path, pointer.name), "", 0)
+                            .as_bytes(),
                     ))
                 });
         }
@@ -2931,6 +3151,38 @@ fn generate_uuid5_code(
         }
     }
     Err("could not generate an unused pointer code after 10000 attempts".to_string())
+}
+
+/// Resolve the token/UUID for a target `{relpath}::{name}` before insertion.
+/// An existing store record (matched by derivation UUID, or by file+name for
+/// legacy bare-name records) is reused so re-annotation keeps its historical
+/// token instead of minting a collision-bumped successor; `--force-remint`
+/// skips reuse and always mints fresh. Records minted earlier in this run are
+/// excluded from reuse so repeated names within one file still get distinct
+/// tokens via the collision counter.
+fn resolve_annotate_pointer(
+    seed: &str,
+    relpath: &str,
+    name: &str,
+    pointers: &HashMap<String, Pointer>,
+    minted: &HashMap<String, Uuid>,
+    force_remint: bool,
+) -> Result<(String, Uuid), String> {
+    if !force_remint {
+        let derivation = Uuid::new_v5(&DOC_POINTER_NAMESPACE, uuid5_name(seed, "", 0).as_bytes());
+        if let Some(existing) = pointers.values().find(|pointer| {
+            pointer.uuid == Some(derivation)
+                || (pointer.path == relpath
+                    && pointer.name == name
+                    && !minted.contains_key(&pointer.code))
+        }) {
+            if let Some(uuid) = existing.uuid {
+                return Ok((existing.code.clone(), uuid));
+            }
+        }
+    }
+    let (code, uuid, _, _) = generate_uuid5_code(seed, DOC_POINTER_NAMESPACE, "", pointers)?;
+    Ok((code, uuid))
 }
 
 fn uuid5_name(name: &str, salt: &str, attempt: usize) -> String {
@@ -3403,7 +3655,10 @@ mod tests {
         let pointer = legacy_records(&db).unwrap().remove("ABCD").unwrap();
         assert_eq!(
             pointer.uuid,
-            Some(Uuid::new_v5(&DOC_POINTER_NAMESPACE, b"doc-pointers:legacy"))
+            Some(Uuid::new_v5(
+                &DOC_POINTER_NAMESPACE,
+                uuid5_name("docs/old.md::legacy", "", 0).as_bytes()
+            ))
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -3421,8 +3676,18 @@ mod tests {
         let first = legacy_records(&db).unwrap();
         assert_ne!(first["ABCD"].uuid, first["EFGH"].uuid);
         assert_eq!(
+            first["ABCD"].uuid,
+            Some(Uuid::new_v5(
+                &DOC_POINTER_NAMESPACE,
+                uuid5_name("docs/a.md::shared", "", 0).as_bytes()
+            ))
+        );
+        assert_eq!(
             first["IJKL"].uuid,
-            Some(Uuid::new_v5(&DOC_POINTER_NAMESPACE, b"doc-pointers:unique"))
+            Some(Uuid::new_v5(
+                &DOC_POINTER_NAMESPACE,
+                uuid5_name("docs/c.md::unique", "", 0).as_bytes()
+            ))
         );
         fs::write(
             &db,
@@ -3432,6 +3697,21 @@ mod tests {
         let second = legacy_records(&db).unwrap();
         assert_eq!(first["ABCD"].uuid, second["ABCD"].uuid);
         assert_eq!(first["EFGH"].uuid, second["EFGH"].uuid);
+        // A key that still repeats within one file binds its UUID to the token.
+        fs::write(
+            &db,
+            r#"{"MNOP":{"path":"docs/d.md","name":"twin"},"QRST":{"path":"docs/d.md","name":"twin"}}"#,
+        )
+        .unwrap();
+        let twins = legacy_records(&db).unwrap();
+        assert_eq!(
+            twins["MNOP"].uuid,
+            Some(Uuid::new_v5(
+                &DOC_POINTER_NAMESPACE,
+                b"doc-pointers:legacy-token:MNOP"
+            ))
+        );
+        assert_ne!(twins["MNOP"].uuid, twins["QRST"].uuid);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -3467,6 +3747,220 @@ mod tests {
     }
 
     #[test]
+    fn collect_pointers_skips_fenced_examples_in_doc_heredocs() {
+        // Fenced examples inside an @doc heredoc are documentation, not real
+        // pointers; markers on surrounding heredoc lines still parse.
+        let root = env::temp_dir().join(format!("doc-pointers-test-{}", Uuid::new_v4()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("lib")).unwrap();
+        fs::write(
+            root.join("lib/cart.ex"),
+            "defmodule Cart do\n  @doc \"\"\"\n  Adds an item.\n\n  ## Example\n\n      ```elixir\n      ⟦FAKE⟧ fake :: Fenced example only.\n      ```\n\n  ⟦REAL⟧ add :: Real marker in the docstring.\n  \"\"\"\n  def add(cart, item), do: cart\nend\n",
+        )
+        .unwrap();
+
+        let (pointers, errors) = collect_pointers(
+            &root,
+            &root.join("docs/doc-pointer-db.json"),
+            &ScanFilter::default(),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert!(errors.is_empty(), "errors: {errors:?}");
+        assert!(pointers.contains_key("REAL"));
+        assert!(!pointers.contains_key("FAKE"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn collect_pointers_skips_rustdoc_fenced_examples() {
+        let root = env::temp_dir().join(format!("doc-pointers-test-{}", Uuid::new_v4()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("src/lib.rs"),
+            "/// Adds numbers.\n///\n/// ```text\n/// ⟦FAKE⟧ fake :: Fenced example only.\n/// ```\n///\n/// ⟦REAL⟧ add :: Real marker in the doc comment.\npub fn add(a: u8, b: u8) -> u8 {\n    a + b\n}\n",
+        )
+        .unwrap();
+
+        let (pointers, errors) = collect_pointers(
+            &root,
+            &root.join("docs/doc-pointer-db.json"),
+            &ScanFilter::default(),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert!(errors.is_empty(), "errors: {errors:?}");
+        assert!(pointers.contains_key("REAL"));
+        assert!(!pointers.contains_key("FAKE"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn collect_pointers_skips_multiline_string_contents() {
+        // `\`-continued string literals (help text, embedded examples) must not
+        // yield phantom pointers — the scanner's own help text used to trip this.
+        let root = env::temp_dir().join(format!("doc-pointers-test-{}", Uuid::new_v4()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("src/help.rs"),
+            "pub fn print_help() {\n    println!(\"\\\n    usage: tool [options]\\n\\\n\\\n      ⟦FAKE⟧ fake :: Help text, not a pointer.\\n\\\n    \");\n}\n\n// ⟦REAL⟧ real :: Real pointer in a comment.\n",
+        )
+        .unwrap();
+
+        let (pointers, errors) = collect_pointers(
+            &root,
+            &root.join("docs/doc-pointer-db.json"),
+            &ScanFilter::default(),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert!(errors.is_empty(), "errors: {errors:?}");
+        assert!(pointers.contains_key("REAL"));
+        assert!(!pointers.contains_key("FAKE"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn scan_filter_excludes_worktrees_and_staging_by_default() {
+        let root = env::temp_dir().join(format!("doc-pointers-test-{}", Uuid::new_v4()));
+        let _ = fs::remove_dir_all(&root);
+        for (dir, token) in [
+            ("src", "TOKN"),
+            (".claude/worktrees/feature", "TOKN"),
+            (".worktrees/legacy", "TOKN"),
+            ("myrepo.worktrees/sibling", "TOKN"),
+            ("staging/experiment", "TOKN"),
+            ("vendor/generated", "VEND"),
+        ] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+            fs::write(
+                root.join(dir).join("note.md"),
+                format!("<!-- ⟦{token}⟧ sample :: Sample pointer. -->\n"),
+            )
+            .unwrap();
+        }
+
+        // Defaults: worktree/staging duplicates are skipped everywhere; normal
+        // trees (src/, vendor/) still scan.
+        let (pointers, errors) = collect_pointers(
+            &root,
+            &root.join("docs/doc-pointer-db.json"),
+            &ScanFilter::default(),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert!(errors.is_empty(), "errors: {errors:?}");
+        assert!(pointers.contains_key("TOKN"));
+        assert!(pointers.contains_key("VEND"));
+        assert_eq!(
+            pointers.len(),
+            2,
+            "only the src/ and vendor/ copies survive"
+        );
+
+        // User excludes: plain prefixes keep working...
+        let mut filter = ScanFilter::default();
+        filter.exclude.push(PathBuf::from("src"));
+        let (pointers, _) = collect_pointers(
+            &root,
+            &root.join("docs/doc-pointer-db.json"),
+            &filter,
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(pointers.len(), 1);
+        assert!(pointers.contains_key("VEND"));
+
+        // ...and globs match by path segment.
+        let mut filter = ScanFilter::default();
+        filter.exclude.push(PathBuf::from("**/generated/**"));
+        let (pointers, _) = collect_pointers(
+            &root,
+            &root.join("docs/doc-pointer-db.json"),
+            &filter,
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(pointers.len(), 1, "glob exclude removed vendor/");
+        assert!(pointers.contains_key("TOKN"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn glob_matcher_matches_segments() {
+        assert!(glob_match("**/vendored/**", "libs/x/vendored/y/z.ex"));
+        assert!(glob_match("src/*.gen.ex", "src/auth.gen.ex"));
+        assert!(!glob_match("src/*.gen.ex", "src/sub/auth.gen.ex"));
+        assert!(glob_match("src/**/*.ex", "src/sub/deep/auth.ex"));
+        assert!(!glob_match("**/vendored/**", "src/auth.ex"));
+        assert!(pattern_matches("plain/prefix", "plain/prefix/file.ex"));
+        assert!(!pattern_matches("plain/prefix", "plain/prefixother.ex"));
+    }
+
+    #[test]
+    fn annotate_reuses_store_records_unless_force_remint() {
+        let root = env::temp_dir().join(format!("doc-pointers-test-{}", Uuid::new_v4()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("src/lib.rs"),
+            "/// Adds numbers.\npub fn add(a: u8, b: u8) -> u8 {\n    a + b\n}\n",
+        )
+        .unwrap();
+
+        let args: Vec<String> = vec![
+            "--root".into(),
+            root.to_string_lossy().into_owned(),
+            "--write".into(),
+        ];
+        annotate_command(&args).unwrap();
+        let first = fs::read_to_string(root.join("src/lib.rs")).unwrap();
+        let first_token = marker_token(&first).expect("marker minted");
+
+        // Strip the marker (store keeps the record) and re-annotate: the same
+        // {file}::{name} record is reused, not collision-bumped.
+        let stripped: String = first
+            .lines()
+            .filter(|line| !line.contains("〚🔧:"))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        fs::write(root.join("src/lib.rs"), stripped).unwrap();
+        annotate_command(&args).unwrap();
+        let reused = fs::read_to_string(root.join("src/lib.rs")).unwrap();
+        assert_eq!(marker_token(&reused).as_deref(), Some(first_token.as_str()));
+
+        // --force-remint mints a fresh token instead of reusing.
+        let stripped: String = reused
+            .lines()
+            .filter(|line| !line.contains("〚🔧:"))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        fs::write(root.join("src/lib.rs"), stripped).unwrap();
+        let mut remint_args = args.clone();
+        remint_args.push("--force-remint".into());
+        annotate_command(&remint_args).unwrap();
+        let reminted = fs::read_to_string(root.join("src/lib.rs")).unwrap();
+        let reminted_token = marker_token(&reminted).expect("marker minted");
+        assert_ne!(reminted_token, first_token);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// First 〚🔧:…〛 token code in the text, as minted by annotate.
+    fn marker_token(text: &str) -> Option<String> {
+        let start = text.find("〚🔧:")? + "〚🔧:".len();
+        let rest = &text[start..];
+        let end = rest.find('〛')?;
+        Some(rest[..end].to_string())
+    }
+
+    #[test]
     fn expand_markdown_links_rewrites_deeplink_targets() {
         let root = env::temp_dir().join(format!("doc-pointers-test-{}", Uuid::new_v4()));
         let _ = fs::remove_dir_all(&root);
@@ -3496,7 +3990,10 @@ mod tests {
         assert_eq!(changed, vec!["docs/ref.md".to_string()]);
 
         let rewritten = fs::read_to_string(root.join("docs/ref.md")).unwrap();
-        let uuid = Uuid::new_v5(&DOC_POINTER_NAMESPACE, b"doc-pointers:Target pointer");
+        let uuid = Uuid::new_v5(
+            &DOC_POINTER_NAMESPACE,
+            uuid5_name("docs/target.md::Target pointer", "", 0).as_bytes(),
+        );
         assert!(rewritten.contains(&format!("[target](docs/target.md:1?pointer={uuid})")));
         assert!(rewritten.contains("[ignored](deeplink:ABCD)"));
 
@@ -3822,19 +4319,21 @@ mod tests {
         let text = fs::read_to_string(root.join("lib/cart.ex")).unwrap();
 
         // moduledoc heredoc: marker appended inside the existing docstring,
-        // never a second attribute.
+        // never a second attribute. Separators are plain empty lines so
+        // `mix format` cannot normalize them away.
         assert_eq!(text.matches("@moduledoc").count(), 1);
-        assert!(text.contains("Long description.\n  \n  〚📦:"));
+        assert!(text.contains("Long description.\n\n  〚📦:"));
         assert!(text.contains("Cart :: Shopping cart."));
 
         // single-line @doc widened to a heredoc preserving the text.
-        assert!(text.contains("@doc \"\"\"\n  Adds an item.\n  \n  〚🔧:"));
+        assert!(text.contains("@doc \"\"\"\n  Adds an item.\n\n  〚🔧:"));
         assert!(text.contains("add :: Adds an item."));
         assert_eq!(text.matches("@doc \"\"\"").count(), 2); // widened add + remove heredoc
 
         // heredoc @doc: marker appended before the closing quotes.
-        assert!(text.contains("Removes an item.\n  \n  〚🔧:"));
+        assert!(text.contains("Removes an item.\n\n  〚🔧:"));
         assert!(text.contains("remove :: Removes an item."));
+        assert!(!text.contains("\n  \n"));
 
         // @doc false stays untouched; marker hangs on a comment above.
         assert!(text.contains("@doc false"));

@@ -336,9 +336,13 @@ defmodule DocPointers.Store do
     existing_uuid = state.token_index[token]
     requested_uuid = attrs["uuid"]
 
+    # Derivation key is `{file_path}::{function}` so same-named functions in
+    # different files never share a token. Legacy bare-name records are still
+    # accepted on load (they are matched by uuid/token, never re-keyed).
     uuid =
       existing_uuid || requested_uuid ||
-        DocPointers.UUID5.build_name(attrs["function"])
+        attrs["file_path"]
+        |> DocPointers.UUID5.build_annotation_name(attrs["function"])
         |> DocPointers.UUID5.generate()
         |> DocPointers.UUID5.to_string()
 
@@ -461,6 +465,21 @@ defmodule DocPointers.Store do
 
   @ignored_segments [".git", "_build", "deps", "node_modules", ".claude", "cover", "tmp"]
 
+  # Worktree/staging duplicates never hold stores of their own; scanning them
+  # produced thousands of phantom records in the monorepo.
+  defp ignored_dir?(path) do
+    path
+    |> Path.split()
+    |> Enum.any?(fn
+      segment when segment in @ignored_segments ->
+        true
+
+      segment ->
+        segment == "staging" or segment == ".worktrees" or
+          String.ends_with?(segment, ".worktrees")
+    end)
+  end
+
   # Walk Git's index for gitlinks instead of spawning a shell for every
   # `git submodule foreach` level. The latter takes minutes in large nested
   # monorepos. Only initialized submodules have a .git entry and a store.
@@ -532,12 +551,6 @@ defmodule DocPointers.Store do
     # (Linux tmp_dir) must not ignore every nested store.
     |> Enum.reject(&(&1 == "." or ignored_dir?(&1)))
     |> Enum.sort_by(&byte_size/1, :desc)
-  end
-
-  defp ignored_dir?(path) do
-    path
-    |> Path.split()
-    |> Enum.any?(&(&1 in @ignored_segments))
   end
 
   defp resolve_store_key(submodules, file_path) when is_binary(file_path) do
@@ -746,15 +759,15 @@ defmodule DocPointers.Store do
           {:ok, entries} when is_map(entries) ->
             name_counts =
               entries
-              |> Enum.map(fn {token, data} -> legacy_name(token, data) end)
+              |> Enum.map(fn {token, data} -> legacy_key(token, data) end)
               |> Enum.frequencies()
 
             Enum.reduce(entries, state, fn {token, data}, acc ->
               name = legacy_name(token, data)
 
               uuid_name =
-                if name_counts[name] == 1,
-                  do: DocPointers.UUID5.build_name(name),
+                if name_counts[legacy_key(token, data)] == 1,
+                  do: DocPointers.UUID5.build_annotation_name(data["path"], name),
                   else: "doc-pointers:legacy-token:#{token}"
 
               uuid_bytes = DocPointers.UUID5.generate(uuid_name)
@@ -789,6 +802,10 @@ defmodule DocPointers.Store do
       _ -> token
     end
   end
+
+  # Legacy ambiguity is judged on the normalized `{path}::{name}` key: the same
+  # function name in different files is no longer treated as a collision.
+  defp legacy_key(token, data), do: "#{data["path"]}::#{legacy_name(token, data)}"
 
   defp save_store(state, store_key) do
     dir = meta_dir(state, store_key)
