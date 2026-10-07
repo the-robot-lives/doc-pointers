@@ -57,4 +57,62 @@ defmodule DocPointers.MarkerTest do
     refute Marker.valid_token?("abCD")
     refute Marker.valid_token?(@uuid)
   end
+
+  test "normalizes emoji and string kinds to the canonical string space" do
+    emoji_defaults = %{
+      "📁" => "file",
+      "📦" => "module",
+      "🔌" => "interface",
+      "🧩" => "component",
+      "🔧" => "function",
+      "🔀" => "logic",
+      "📐" => "diagram"
+    }
+
+    for {emoji, string} <- emoji_defaults do
+      assert Marker.normalize_kind(emoji) == string
+      assert Marker.valid_kind?(emoji)
+      assert Marker.emoji_for(string) == emoji
+    end
+
+    # Fine-grained siblings of 📦 and 🔌 keep their own string kind but share
+    # the emoji scope in markers.
+    for fine <- ["class", "struct"] do
+      assert Marker.normalize_kind(fine) == fine
+      assert Marker.emoji_for(fine) == "📦"
+    end
+
+    for fine <- ["protocol", "behaviour"] do
+      assert Marker.normalize_kind(fine) == fine
+      assert Marker.emoji_for(fine) == "🔌"
+    end
+
+    assert Marker.string_kinds() ==
+             ~w(file module class struct interface protocol behaviour function logic component diagram)
+
+    assert Marker.default_kind() == "function"
+    refute Marker.valid_kind?("widget")
+    assert Marker.normalize_kind("widget") == nil
+  end
+
+  test "open/close/declaration accept string kinds and render emoji markers with token payloads" do
+    assert Marker.open(@uuid, "function") == "〚🔧:#{@token}〛"
+    assert Marker.open(@uuid) == "〚🔧:#{@token}〛"
+    assert Marker.open(@uuid, "class") == "〚📦:#{@token}〛"
+
+    assert Marker.declaration(@uuid, "protocol", "Auth", "does auth") ==
+             "〚🔌:#{@token}〛 Auth :: does auth"
+
+    assert Marker.parse(Marker.open(@uuid, "component")) ==
+             {:ok, %{kind: "🧩", token: @token, closing: false}}
+
+    assert Marker.close(@uuid, "component") == "〚/🧩:#{@token}〛"
+    assert Marker.close(@uuid, "logic") == "〚/🔀:#{@token}〛"
+    assert Marker.close(@uuid, "diagram") == "〚/📐:#{@token}〛"
+    assert Marker.close(@uuid, "🧩") == "〚/🧩:#{@token}〛"
+    assert Marker.closable?("component") and Marker.closable?("🔀")
+
+    assert_raise ArgumentError, fn -> Marker.close(@uuid, "module") end
+    assert_raise ArgumentError, fn -> Marker.close(@uuid, "function") end
+  end
 end

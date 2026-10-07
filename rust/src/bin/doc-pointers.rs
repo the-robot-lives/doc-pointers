@@ -34,7 +34,7 @@ const fn token_alphabet_size() -> u128 {
 #[derive(Debug, Clone)]
 struct Pointer {
     uuid: Option<Uuid>,
-    kind: Option<MarkerKind>,
+    kind: Option<String>,
     code: String,
     path: String,
     line: usize,
@@ -110,7 +110,7 @@ struct Uuid5Options {
     namespace: String,
     salt: String,
     format: PointerFormat,
-    kind: MarkerKind,
+    kind: String,
     description: String,
     no_clipboard: bool,
 }
@@ -165,6 +165,65 @@ impl MarkerKind {
     fn closable(self) -> bool {
         matches!(self, Self::Component | Self::Logic | Self::Diagram)
     }
+
+    /// Canonical string kind stored in .meta/pointers.yaml. Emoji markers map
+    /// to their canonical default; fine-grained siblings (class, struct,
+    /// protocol, behaviour) are only reachable through explicit string kinds.
+    fn canonical(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Module => "module",
+            Self::Contract => "interface",
+            Self::Component => "component",
+            Self::Function => "function",
+            Self::Logic => "logic",
+            Self::Diagram => "diagram",
+        }
+    }
+}
+
+/// Canonical string kinds stored in .meta/pointers.yaml. Accepts the
+/// fine-grained string space plus legacy scope emoji (and historical CLI
+/// aliases), normalizing everything to a canonical string.
+fn parse_kind_string(value: &str) -> Option<String> {
+    let canonical = match value {
+        "file" | "📁" => "file",
+        "module" | "📦" => "module",
+        "class" => "class",
+        "struct" => "struct",
+        "interface" | "contract" | "🔌" => "interface",
+        "protocol" => "protocol",
+        "behaviour" | "behavior" => "behaviour",
+        "function" | "🔧" => "function",
+        "logic" | "🔀" => "logic",
+        "component" | "🧩" => "component",
+        "diagram" | "mermaid" | "plantuml" | "📐" => "diagram",
+        _ => return None,
+    };
+    Some(canonical.to_string())
+}
+
+fn emoji_for_kind(kind: &str) -> &'static str {
+    match kind {
+        "file" => "📁",
+        "module" | "class" | "struct" => "📦",
+        "interface" | "protocol" | "behaviour" | "contract" => "🔌",
+        "component" => "🧩",
+        "function" => "🔧",
+        "logic" => "🔀",
+        "diagram" | "mermaid" | "plantuml" => "📐",
+        _ => "🔧",
+    }
+}
+
+fn kind_is_closable(kind: &str) -> bool {
+    matches!(kind, "component" | "logic" | "diagram")
+}
+
+/// A stored string kind matches a marker kind when they share the same emoji
+/// scope (so a stored "class" matches a 📦 marker).
+fn stored_kind_matches(stored: &Option<String>, kind: MarkerKind) -> bool {
+    stored.as_deref().and_then(MarkerKind::parse) == Some(kind)
 }
 
 /// A canonical marker payload. New markers embed the 4-glyph token
@@ -358,7 +417,7 @@ fn uuid5_command(args: &[String]) -> Result<(), String> {
         generate_uuid5_code(&seed, namespace, &options.salt, &pointers)?;
     let payload = format_pointer(
         options.format,
-        options.kind,
+        &options.kind,
         &code,
         options.name.as_deref(),
         &options.description,
@@ -370,9 +429,9 @@ fn uuid5_command(args: &[String]) -> Result<(), String> {
         println!("collision-attempt: {attempt}");
     }
     println!("code: {code}");
-    println!("marker: 〚{}:{code}〛", options.kind.emoji());
-    if options.kind.closable() {
-        println!("closing: 〚/{}:{code}〛", options.kind.emoji());
+    println!("marker: 〚{}:{code}〛", emoji_for_kind(&options.kind));
+    if kind_is_closable(&options.kind) {
+        println!("closing: 〚/{}:{code}〛", emoji_for_kind(&options.kind));
     }
     println!("clipboard: {payload}");
 
@@ -437,8 +496,11 @@ fn lookup_command(args: &[String]) -> Result<(), String> {
             .find(|record| record.get("token").and_then(Value::as_str) == Some(code.as_str())),
     }
     .ok_or_else(|| format!("pointer {} not found", payload.as_str()))?;
-    let kind = record.get("kind").and_then(Value::as_str).unwrap_or("🔧");
-    if expected_kind.is_some_and(|expected| expected.emoji() != kind) {
+    let kind = record
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("function");
+    if expected_kind.is_some_and(|expected| MarkerKind::parse(kind) != Some(expected)) {
         return Err(format!(
             "pointer {} has kind {kind}, not the requested kind",
             payload.as_str()
@@ -449,7 +511,7 @@ fn lookup_command(args: &[String]) -> Result<(), String> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .unwrap_or_else(|| payload.as_str());
-    println!("marker: 〚{kind}:{token}〛");
+    println!("marker: 〚{}:{token}〛", emoji_for_kind(kind));
     for (label, key) in [
         ("token", "token"),
         ("name", "function"),
@@ -1557,7 +1619,7 @@ fn annotate_command(args: &[String]) -> Result<(), String> {
                 code.clone(),
                 Pointer {
                     uuid: Some(uuid),
-                    kind: Some(*kind),
+                    kind: Some(kind.canonical().to_string()),
                     code,
                     path: relpath.clone(),
                     line: idx + 1, // provisional; the closing build records exact lines
@@ -1758,7 +1820,7 @@ fn parse_uuid5_options(args: &[String]) -> Result<Uuid5Options, String> {
     let mut namespace = "doc-pointers".to_string();
     let mut salt = String::new();
     let mut format = PointerFormat::Marker;
-    let mut kind = MarkerKind::Function;
+    let mut kind = "function".to_string();
     let mut description = String::new();
     let mut no_clipboard = false;
 
@@ -1798,7 +1860,7 @@ fn parse_uuid5_options(args: &[String]) -> Result<Uuid5Options, String> {
             "--kind" => {
                 index += 1;
                 let value = expect_value(args, index, "--kind")?;
-                kind = MarkerKind::parse(value)
+                kind = parse_kind_string(&value)
                     .ok_or_else(|| format!("invalid --kind value: {value}"))?;
             }
             "--description" => {
@@ -1849,8 +1911,9 @@ Full UUIDv5 payloads (〚🔧:5c692577-ad0c-51f1-992c-759b5e5fffb5〛) remain
 accepted everywhere markers are parsed or looked up; new markers embed the
 token, derived from the UUID — tokens are never invented.
 
-Kinds: 📁 file, 📦 module/class/struct, 🔌 contract/interface/protocol,
-       🧩 reusable component, 🔧 function, 🔀 logic, 📐 diagram.
+Markers use scope emoji; stored kinds are canonical strings. 📁 file,
+       📦 module/class/struct, 🔌 interface/protocol/behaviour, 🧩 component,
+       🔧 function, 🔀 logic, 📐 diagram.
 Spans for 🧩, 🔀, and 📐 require a matching closing marker. A component may
 appear in multiple files; lookup lists all its locations. Old ⟦4-glyph⟧
 declarations and deeplinks are read for migration, never generated.
@@ -1889,7 +1952,8 @@ fn print_uuid5_help() {
 Generate a deterministic UUIDv5 and typed pointer marker.\n\
 The token is collision-checked against current stores and copied to\n\
 the clipboard unless --no-clipboard is given.\n\n\
-options:\n  --root ROOT             repository root, default: current directory\n  --db DB                 deprecated; only docs/doc-pointer-db.json is accepted\n  --namespace NAMESPACE   doc-pointers, dns, url, oid, x500, or a UUID\n  --salt SALT             optional deterministic salt\n  --format FORMAT         marker, code, declaration, or deeplink\n  --kind KIND             file, module, contract, component, function, logic, diagram\n  --description TEXT      description used by --format declaration\n  --no-clipboard          print without copying to clipboard"
+options:\n  --root ROOT             repository root, default: current directory\n  --db DB                 deprecated; only docs/doc-pointer-db.json is accepted\n  --namespace NAMESPACE   doc-pointers, dns, url, oid, x500, or a UUID\n  --salt SALT             optional deterministic salt\n  --format FORMAT         marker, code, declaration, or deeplink\n  --kind KIND             file, module, class, struct, interface, protocol, behaviour,
+                          function, logic, component, or diagram (legacy emoji accepted)\n  --description TEXT      description used by --format declaration\n  --no-clipboard          print without copying to clipboard"
     );
 }
 
@@ -1986,7 +2050,7 @@ fn collect_pointers(
                 let location_index = if let Some(existing) = pointers.get_mut(&code) {
                     if kind == MarkerKind::Component
                         && existing.uuid == Some(uuid)
-                        && existing.kind == Some(kind)
+                        && stored_kind_matches(&existing.kind, kind)
                     {
                         existing.locations.push(location);
                         Some(existing.locations.len() - 1)
@@ -2004,7 +2068,7 @@ fn collect_pointers(
                         code.clone(),
                         Pointer {
                             uuid: Some(uuid),
-                            kind: Some(kind),
+                            kind: Some(kind.canonical().to_string()),
                             code: code.clone(),
                             path: file_path.clone(),
                             line: index + 1,
@@ -2364,12 +2428,12 @@ fn expand_line(
         if canonical.is_some() || (code.chars().count() == 4 && valid_code(&code)) {
             output.push_str(before);
             let pointer = match canonical.map(|(kind, payload, _, _)| (kind, payload)) {
-                Some((kind, MarkerPayload::Uuid(uuid))) => pointers
-                    .values()
-                    .find(|pointer| pointer.uuid == Some(uuid) && pointer.kind == Some(kind)),
+                Some((kind, MarkerPayload::Uuid(uuid))) => pointers.values().find(|pointer| {
+                    pointer.uuid == Some(uuid) && stored_kind_matches(&pointer.kind, kind)
+                }),
                 Some((kind, MarkerPayload::Token(token))) => pointers
                     .get(&token)
-                    .filter(|pointer| pointer.kind == Some(kind)),
+                    .filter(|pointer| stored_kind_matches(&pointer.kind, kind)),
                 None => pointers.get(&code),
             };
             if let Some(pointer) = pointer {
@@ -2490,8 +2554,8 @@ fn pointer_record(pointer: &Pointer) -> Value {
     if let Some(uuid) = pointer.uuid {
         record["uuid"] = json!(uuid.to_string());
     }
-    if let Some(kind) = pointer.kind {
-        record["kind"] = json!(kind.emoji());
+    if let Some(kind) = &pointer.kind {
+        record["kind"] = json!(kind);
     }
     if !pointer.locations.is_empty() {
         let mut locations = pointer.locations.clone();
@@ -2539,8 +2603,8 @@ fn hydrate_pointer_ids(
         if pointer.kind.is_none() {
             pointer.kind = status
                 .get(code)
-                .and_then(|existing| existing.kind)
-                .or(Some(MarkerKind::Function));
+                .and_then(|existing| existing.kind.clone())
+                .or_else(|| Some("function".to_string()));
         }
     }
     Ok(())
@@ -2565,7 +2629,7 @@ fn reconcile_records(
         if let Some(uuid) = pointer.uuid {
             if let Some(existing) = by_uuid.get(&uuid) {
                 pointer.code = existing.code.clone();
-                if pointer.kind == Some(MarkerKind::Component) {
+                if stored_kind_matches(&pointer.kind, MarkerKind::Component) {
                     pointer.locations.extend(
                         existing
                             .locations
@@ -2612,7 +2676,7 @@ fn backend_status(root: &Path) -> Result<Vec<Pointer>, String> {
                 kind: record
                     .get("kind")
                     .and_then(Value::as_str)
-                    .and_then(MarkerKind::parse),
+                    .and_then(parse_kind_string),
                 code: text("token")?,
                 path: text("file_path")?,
                 line: record.get("line").and_then(Value::as_u64).unwrap_or(0) as usize,
@@ -2860,14 +2924,14 @@ fn token_char_from_index(mut index: u32) -> char {
 
 fn format_pointer(
     format: PointerFormat,
-    kind: MarkerKind,
+    kind: &str,
     code: &str,
     name: Option<&str>,
     description: &str,
 ) -> Result<String, String> {
     // Emitted markers embed the 4-glyph token; full-UUID payloads stay
     // accepted on lookup, they are just no longer what we print.
-    let marker = format!("〚{}:{code}〛", kind.emoji());
+    let marker = format!("〚{}:{code}〛", emoji_for_kind(kind));
     let payload = match format {
         PointerFormat::Marker => marker,
         PointerFormat::Code => code.to_string(),
@@ -3086,6 +3150,49 @@ mod tests {
     }
 
     #[test]
+    fn kind_strings_normalize_and_match_marker_scope() {
+        let cases = [
+            ("file", "file"),
+            ("module", "module"),
+            ("class", "class"),
+            ("struct", "struct"),
+            ("interface", "interface"),
+            ("protocol", "protocol"),
+            ("behaviour", "behaviour"),
+            ("behavior", "behaviour"),
+            ("function", "function"),
+            ("logic", "logic"),
+            ("component", "component"),
+            ("diagram", "diagram"),
+            ("contract", "interface"),
+            ("mermaid", "diagram"),
+            ("plantuml", "diagram"),
+            ("📁", "file"),
+            ("📦", "module"),
+            ("🔌", "interface"),
+            ("🧩", "component"),
+            ("🔧", "function"),
+            ("🔀", "logic"),
+            ("📐", "diagram"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(parse_kind_string(input).as_deref(), Some(expected));
+        }
+        assert_eq!(parse_kind_string("widget"), None);
+
+        assert_eq!(emoji_for_kind("class"), "📦");
+        assert_eq!(emoji_for_kind("protocol"), "🔌");
+        assert_eq!(emoji_for_kind("behaviour"), "🔌");
+        assert!(kind_is_closable("component"));
+        assert!(!kind_is_closable("module"));
+
+        let stored = Some("class".to_string());
+        assert!(stored_kind_matches(&stored, MarkerKind::Module));
+        assert!(!stored_kind_matches(&stored, MarkerKind::Function));
+        assert!(stored_kind_matches(&None, MarkerKind::Function) == false);
+    }
+
+    #[test]
     fn repeated_component_spans_collect_all_locations() {
         let root = env::temp_dir().join(format!("doc-pointers-test-{}", Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
@@ -3111,7 +3218,7 @@ mod tests {
         .unwrap();
         assert!(errors.is_empty(), "{errors:?}");
         let pointer = &pointers[&unicode4_encode_uuid(uuid)];
-        assert_eq!(pointer.kind, Some(MarkerKind::Component));
+        assert_eq!(pointer.kind.as_deref(), Some("component"));
         assert_eq!(pointer.locations.len(), 2);
         assert!(pointer
             .locations

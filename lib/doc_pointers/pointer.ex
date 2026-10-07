@@ -1,4 +1,6 @@
 defmodule DocPointers.Pointer do
+  alias DocPointers.Marker
+
   @enforce_keys [:uuid, :token, :function, :description]
   defstruct [
     :uuid,
@@ -36,7 +38,7 @@ defmodule DocPointers.Pointer do
     %__MODULE__{
       uuid: Map.fetch!(attrs, :uuid),
       token: Map.fetch!(attrs, :token),
-      kind: Map.get(attrs, :kind, "🔧"),
+      kind: Map.get(attrs, :kind, "function") |> Marker.normalize_kind() || Marker.default_kind(),
       kind_explicit: true,
       locations: Map.get(attrs, :locations, []),
       file_path: Map.get(attrs, :file_path),
@@ -70,7 +72,8 @@ defmodule DocPointers.Pointer do
     %__MODULE__{
       uuid: uuid,
       token: map["token"],
-      kind: map["kind"] || "🔧",
+      # Legacy emoji kinds normalize to canonical strings on load.
+      kind: (map["kind"] && Marker.normalize_kind(map["kind"])) || "function",
       kind_explicit: Map.has_key?(map, "kind"),
       locations: map["locations"] || [],
       file_path: map["file_path"],

@@ -1,7 +1,7 @@
 defmodule DocPointers.Store do
   use GenServer
 
-  alias DocPointers.Pointer
+  alias DocPointers.{Marker, Pointer}
 
   defmodule InvalidStoreError do
     defexception [:message]
@@ -157,7 +157,7 @@ defmodule DocPointers.Store do
           |> maybe_update(:class, updates)
           |> maybe_update(:line, updates)
           |> maybe_update(:file_path, updates)
-          |> maybe_update(:kind, updates)
+          |> maybe_update_kind(updates)
           |> then(fn p ->
             if Map.has_key?(updates, :kind), do: %{p | kind_explicit: true}, else: p
           end)
@@ -262,31 +262,39 @@ defmodule DocPointers.Store do
     file_path = attrs["file_path"]
     function = attrs["function"]
     description = attrs["description"]
-    kind = attrs["kind"] || (existing_by_uuid && existing_by_uuid.kind) || "🔧"
+    kind = attrs["kind"] || (existing_by_uuid && existing_by_uuid.kind) || "function"
     owner = state.store_membership[requested_uuid] || ""
 
     locations =
       attrs["locations"] ||
         (existing_by_uuid && public_locations(existing_by_uuid.locations, owner)) || []
 
+    # Legacy emoji kinds normalize to canonical strings before persisting.
     attrs =
-      attrs |> Map.put("token", token) |> Map.put("kind", kind) |> Map.put("locations", locations)
+      attrs
+      |> Map.put("token", token)
+      |> Map.put("kind", Marker.normalize_kind(kind))
+      |> Map.put("locations", locations)
 
     cond do
       not (is_binary(token) and String.length(token) == 4) ->
         {:error, "record token must contain exactly four glyphs"}
 
       not DocPointers.Marker.valid_kind?(kind) ->
-        {:error, "record kind must be one of 📁, 📦, 🔌, 🧩, 🔧, 🔀, 📐"}
+        {:error,
+         "record kind must be one of " <>
+           Enum.join(DocPointers.Marker.string_kinds(), ", ") <>
+           " (legacy scope emoji accepted)"}
 
       not valid_locations?(locations) ->
         {:error,
          "record locations must contain root-relative file_path and optional line/end_line"}
 
-      kind != "🧩" and length(locations) > 1 ->
+      Marker.normalize_kind(kind) != "component" and length(locations) > 1 ->
         {:error, "only component records may have multiple locations"}
 
-      kind != "🧩" and locations != [] and hd(locations)["file_path"] != file_path ->
+      Marker.normalize_kind(kind) != "component" and locations != [] and
+          hd(locations)["file_path"] != file_path ->
         {:error, "single-anchor location must match record file_path"}
 
       not valid_relative_path?(file_path) ->
@@ -317,7 +325,7 @@ defmodule DocPointers.Store do
       end)
 
     attrs =
-      if attrs["kind"] == "🧩" and attrs["locations"] != [] do
+      if attrs["kind"] == "component" and attrs["locations"] != [] do
         first = hd(attrs["locations"])
         attrs |> Map.put("file_path", first["file_path"]) |> Map.put("line", first["line"])
       else
@@ -542,7 +550,9 @@ defmodule DocPointers.Store do
 
   defp resolve_and_adjust(state, %Pointer{} = pointer) do
     store_key =
-      if pointer.kind == "🧩", do: "", else: resolve_store_key(state.submodules, pointer.file_path)
+      if pointer.kind == "component",
+        do: "",
+        else: resolve_store_key(state.submodules, pointer.file_path)
 
     adjusted =
       if store_key != "" and pointer.file_path do
@@ -582,6 +592,14 @@ defmodule DocPointers.Store do
     case Map.get(updates, field) do
       nil -> pointer
       value -> Map.put(pointer, field, value)
+    end
+  end
+
+  # Kind updates normalize legacy emoji to canonical strings.
+  defp maybe_update_kind(pointer, updates) do
+    case updates[:kind] && Marker.normalize_kind(updates[:kind]) do
+      nil -> pointer
+      kind -> %{pointer | kind: kind}
     end
   end
 
