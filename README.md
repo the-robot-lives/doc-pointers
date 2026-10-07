@@ -26,6 +26,22 @@ Components, logic regions, and diagrams can close with `〚/{same emoji}:{same U
 
 The legacy `⟦four glyphs⟧` form remains readable for existing citations; new markers use the typed UUID form. New deep links may use `?pointer=UUID`; existing `?code=⟦TOKEN⟧` links remain valid for consumers that support them.
 
+## Stored kinds
+
+Source markers always carry the scope emoji, but `.meta/pointers.yaml` stores `kind` as a canonical **string** so fine-grained types are differentiated:
+
+| String kind | Marker emoji |
+|---|---|
+| `file` | 📁 |
+| `module` (default), `class`, `struct` | 📦 |
+| `interface` (default), `protocol`, `behaviour` | 🔌 |
+| `function` (default) | 🔧 |
+| `logic` | 🔀 |
+| `component` | 🧩 |
+| `diagram` | 📐 |
+
+Emoji markers normalize to the emoji's canonical default string when stored (`📦` → `module`, `🔌` → `interface`); fine-grained kinds are set explicitly via the tools' `kind` argument. Tools accept both string kinds and legacy emoji, normalizing emoji to strings. Existing yamls with emoji kinds keep loading — the kind normalizes on load and is written back as a string on the next store save.
+
 `doc-pointer/lookup` accepts a plain UUID, `emoji:UUID`, a full typed marker, or a legacy glyph marker. It returns metadata and bounded source snippets. A component lookup returns one snippet for each stored occurrence; missing files appear as a per-occurrence error.
 
 ## Getting Started

@@ -90,6 +90,8 @@ defmodule DocPointers.StoreReconcileTest do
     assert {:ok, %{inserted: 1}} = Store.reconcile([component], true)
     assert [stored] = Store.snapshot().records
     assert stored["uuid"] == uuid
+    # Legacy emoji input normalizes to the canonical string kind.
+    assert stored["kind"] == "component"
     assert stored["locations"] == locations
     assert stored["file_path"] == "lib/a.ex"
     assert stored["line"] == 3

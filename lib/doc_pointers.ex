@@ -18,7 +18,8 @@ defmodule DocPointers do
     line = Keyword.get(opts, :line)
     salt = Keyword.get(opts, :salt)
     name_override = Keyword.get(opts, :name_override)
-    kind = Keyword.get(opts, :kind, "🔧")
+    kind = Keyword.get(opts, :kind, Marker.default_kind())
+    kind = Marker.normalize_kind(kind) || kind
 
     base_name = name_override || UUID5.build_annotation_name(file_path, function_name)
 

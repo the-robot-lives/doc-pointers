@@ -12,7 +12,12 @@ defmodule DocPointers.MCP.Tools.Update do
     field(:class, :string, description: "New class/module name")
     field(:line, :integer, description: "Updated line number")
     field(:file_path, :string, description: "Updated file path (if the source file moved)")
-    field(:kind, :string, description: "Scope emoji: 📁, 📦, 🔌, 🧩, 🔧, 🔀, or 📐")
+
+    field(:kind, :string,
+      description:
+        "Kind string: file, module, class, struct, interface, protocol, behaviour, " <>
+          "function, logic, component, diagram. Legacy scope emoji accepted."
+    )
 
     field(:confirm, :boolean,
       description: "Required true unless the server was started with --write"
@@ -59,8 +64,16 @@ defmodule DocPointers.MCP.Tools.Update do
       updates = if args[:kind], do: Map.put(updates, :kind, args.kind), else: updates
 
       if args[:kind] && not DocPointers.Marker.valid_kind?(args.kind) do
-        {:error, "kind must be one of 📁, 📦, 🔌, 🧩, 🔧, 🔀, 📐"}
+        {:error,
+         "kind must be one of " <>
+           Enum.join(DocPointers.Marker.string_kinds(), ", ") <>
+           " (legacy scope emoji accepted)"}
       else
+        updates =
+          if args[:kind],
+            do: Map.put(updates, :kind, DocPointers.Marker.normalize_kind(args.kind)),
+            else: updates
+
         update_pointer(uuid, updates)
       end
     end

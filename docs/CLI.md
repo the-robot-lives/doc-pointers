@@ -33,6 +33,8 @@ Canonical markers use a type emoji and a lowercase hyphenated UUIDv5:
 
 A component, logic section, or diagram has a matching closing marker with the same emoji and UUID. Closers are validated per file and may nest. A reusable component can have several opening/closing spans; all its locations are stored under one UUID.
 
+Markers stay emoji, but the store records `kind` as a canonical string: `file`, `module`, `class`, `struct`, `interface`, `protocol`, `behaviour`, `function`, `logic`, `component`, `diagram`. Each emoji maps to its canonical default (`📦` → `module`, `🔌` → `interface`); `--kind` and the MCP tools accept both strings and emoji and normalize to strings. Existing stores with emoji kinds load unchanged and are rewritten with string kinds on the next save.
+
 ```text
 # 〚🧩:5c692577-ad0c-51f1-992c-759b5e5fffb5〛 shared panel :: reusable section
 ...
