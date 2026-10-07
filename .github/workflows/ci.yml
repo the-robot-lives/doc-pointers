@@ -66,6 +66,9 @@ jobs:
       - name: Test (coverage gate in mix.exs)
         run: mix test --cover
 
+      - name: Test Rust CLI and Elixir backend integration
+        run: cargo test --locked --manifest-path rust/Cargo.toml
+
       - name: Upload coverage report
         if: always()
         uses: actions/upload-artifact@v4

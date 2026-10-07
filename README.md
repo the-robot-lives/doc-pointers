@@ -10,6 +10,7 @@ An Elixir (`~> 1.18`) Mix app (`:doc_pointers`) with two surfaces sharing one st
 
 - **MCP** — stdio (preferred) or loopback Streamable HTTP, so agents can resolve pointers.
 - **Library** — `DocPointers.generate/3,4` for Elixir callers.
+- **CLI** — Rust `doc-pointers` scans markers and Markdown, using the Elixir store as its persistence backend. See [CLI guide](docs/CLI.md).
 
 Default MCP tools are read-only (`doc-pointer/lookup`, `doc-pointer/list`); `generate`/`update` stay off unless you pass `--write` or `confirm=true`.
 
