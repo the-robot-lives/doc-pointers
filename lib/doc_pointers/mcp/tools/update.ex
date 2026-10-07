@@ -13,6 +13,12 @@ defmodule DocPointers.MCP.Tools.Update do
     field(:line, :integer, description: "Updated line number")
     field(:file_path, :string, description: "Updated file path (if the source file moved)")
 
+    field(:kind, :string,
+      description:
+        "Kind string: file, module, class, struct, interface, protocol, behaviour, " <>
+          "function, logic, component, diagram. Legacy scope emoji accepted."
+    )
+
     field(:confirm, :boolean,
       description: "Required true unless the server was started with --write"
     )
@@ -55,24 +61,43 @@ defmodule DocPointers.MCP.Tools.Update do
       updates =
         if args[:file_path], do: Map.put(updates, :file_path, args.file_path), else: updates
 
-      case DocPointers.Store.update(uuid, updates) do
-        {:ok, pointer} ->
-          {:ok,
-           %{
-             uuid: pointer.uuid,
-             token: pointer.token,
-             marker: DocPointers.Hieroglyph.marker(pointer.token),
-             file_path: pointer.file_path,
-             class: pointer.class,
-             function: pointer.function,
-             line: pointer.line,
-             description: pointer.description,
-             updated_at: pointer.updated_at
-           }}
+      updates = if args[:kind], do: Map.put(updates, :kind, args.kind), else: updates
 
-        {:error, :not_found} ->
-          {:error, "Pointer #{uuid} not found"}
+      if args[:kind] && not DocPointers.Marker.valid_kind?(args.kind) do
+        {:error,
+         "kind must be one of " <>
+           Enum.join(DocPointers.Marker.string_kinds(), ", ") <>
+           " (legacy scope emoji accepted)"}
+      else
+        updates =
+          if args[:kind],
+            do: Map.put(updates, :kind, DocPointers.Marker.normalize_kind(args.kind)),
+            else: updates
+
+        update_pointer(uuid, updates)
       end
+    end
+  end
+
+  defp update_pointer(uuid, updates) do
+    case DocPointers.Store.update(uuid, updates) do
+      {:ok, pointer} ->
+        {:ok,
+         %{
+           uuid: pointer.uuid,
+           token: pointer.token,
+           kind: pointer.kind,
+           marker: DocPointers.Marker.open(pointer.uuid, pointer.kind),
+           file_path: pointer.file_path,
+           class: pointer.class,
+           function: pointer.function,
+           line: pointer.line,
+           description: pointer.description,
+           updated_at: pointer.updated_at
+         }}
+
+      {:error, :not_found} ->
+        {:error, "Pointer #{uuid} not found"}
     end
   end
 end

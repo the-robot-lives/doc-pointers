@@ -12,6 +12,12 @@ defmodule DocPointers.MCP do
     They are listed when the server is started with --write (or DOC_POINTERS_MCP_WRITES=1);
     otherwise they require confirm=true (or a client confirmation prompt).
 
+    Stored kinds are canonical strings: file, module, class, struct, interface,
+    protocol, behaviour, function, logic, component, diagram. Source markers stay
+    emoji (〚🔧:uuid〛); the emoji maps to a canonical default string when stored
+    (📁→file, 📦→module, 🔌→interface, 🧩→component, 🔧→function, 🔀→logic, 📐→diagram).
+    Tools accept string kinds and legacy emoji, and normalize emoji to strings.
+
     Pointers are keyed by full UUID in the .meta/pointers.yaml of the git repo that
     owns the file: the root for root-level files, each (nested) submodule's own
     folder for files inside it. Pass file_path relative to the server root; it is

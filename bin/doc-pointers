@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+exec cargo run --quiet --manifest-path "$repo_dir/rust/Cargo.toml" --bin doc-pointers -- "$@"

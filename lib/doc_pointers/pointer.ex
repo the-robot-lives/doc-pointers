@@ -1,8 +1,13 @@
 defmodule DocPointers.Pointer do
+  alias DocPointers.Marker
+
   @enforce_keys [:uuid, :token, :function, :description]
   defstruct [
     :uuid,
     :token,
+    :kind,
+    :kind_explicit,
+    :locations,
     :file_path,
     :class,
     :function,
@@ -15,6 +20,9 @@ defmodule DocPointers.Pointer do
   @type t :: %__MODULE__{
           uuid: String.t(),
           token: String.t(),
+          kind: String.t(),
+          kind_explicit: boolean(),
+          locations: [map()],
           file_path: String.t() | nil,
           class: String.t() | nil,
           function: String.t(),
@@ -30,6 +38,9 @@ defmodule DocPointers.Pointer do
     %__MODULE__{
       uuid: Map.fetch!(attrs, :uuid),
       token: Map.fetch!(attrs, :token),
+      kind: Map.get(attrs, :kind, "function") |> Marker.normalize_kind() || Marker.default_kind(),
+      kind_explicit: true,
+      locations: Map.get(attrs, :locations, []),
       file_path: Map.get(attrs, :file_path),
       class: Map.get(attrs, :class),
       function: Map.fetch!(attrs, :function),
@@ -43,6 +54,8 @@ defmodule DocPointers.Pointer do
   def to_map(%__MODULE__{} = p) do
     %{
       "token" => p.token,
+      "kind" => if(p.kind_explicit, do: p.kind),
+      "locations" => if(p.locations != [], do: p.locations),
       "function" => p.function,
       "file_path" => p.file_path,
       "class" => p.class,
@@ -59,6 +72,10 @@ defmodule DocPointers.Pointer do
     %__MODULE__{
       uuid: uuid,
       token: map["token"],
+      # Legacy emoji kinds normalize to canonical strings on load.
+      kind: (map["kind"] && Marker.normalize_kind(map["kind"])) || "function",
+      kind_explicit: Map.has_key?(map, "kind"),
+      locations: map["locations"] || [],
       file_path: map["file_path"],
       class: map["class"],
       function: map["function"],

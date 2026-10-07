@@ -24,3 +24,6 @@ doc_pointers-*.tar
 
 # Canonical worktree placement
 .claude/worktrees/
+
+# Rust CLI build artifacts
+/rust/target/

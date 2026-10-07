@@ -32,7 +32,7 @@ defmodule DocPointers.MCP.Tools.GenerateTest do
       assert String.length(result.uuid) == 36
       assert is_binary(result.token)
       assert String.length(result.token) == 4
-      assert result.marker == "⟦#{result.token}⟧"
+      assert result.marker == "〚🔧:#{result.token}〛"
       assert result.file_path == "lib/my_app/auth.ex"
       assert result.function == "login"
     end
