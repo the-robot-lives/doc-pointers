@@ -22,7 +22,7 @@ defmodule DocPointers.MixProject do
 
   defp deps do
     [
-      {:noizu_mcp, "~> 0.1.3"},
+      {:noizu_mcp, "~> 0.5.0"},
       {:yaml_elixir, "~> 2.11"},
       {:ymlr, "~> 5.0"},
       {:jason, "~> 1.4"},
