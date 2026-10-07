@@ -6,6 +6,7 @@ Elixir MCP/library for UUIDv5 → 4-glyph doc-pointer tokens
 ```
 doc-pointers/
 ├── mix.exs · mix.lock · README.md · merge-notes.md
+├── CLAUDE.md · AGENTS.md · AGENT.md      # agent instructions (Claude / Grok / Codex)
 ├── .formatter.exs · .tool-versions · .gitignore
 ├── lib/
 │   ├── doc_pointers.ex                 # public generate API
@@ -20,7 +21,8 @@ doc-pointers/
 └── docs/
     ├── PROJ-LAYOUT.md · PROJ-LAYOUT.summary.md
     ├── PROJ-ARCH.md · PROJ-ARCH.summary.md
-    └── PROJ-SCHEMA.md · PROJ-SCHEMA.summary.md
+    ├── PROJ-SCHEMA.md · PROJ-SCHEMA.summary.md
+    └── THREAT-MODEL.md · THREAT-MODEL.summary.md
 ```
 
 Runtime data (at target root): `.meta/pointers.yaml` (+ optional legacy
