@@ -13,6 +13,8 @@ doc-pointers/
 ├── mix.exs · mix.lock            # ★ Mix project :doc_pointers (Elixir ~> 1.18)
 ├── README.md                     # Front door: MCP + library API, storage, config
 ├── merge-notes.md                # Working notes from branch merges
+├── CLAUDE.md                     # Agent instructions (Claude Code): stack, worktree rules
+├── AGENTS.md · AGENT.md          # Mirrored agent instructions (Grok / Codex)
 │
 ├── .formatter.exs                # mix format rules (standard Elixir)
 ├── .tool-versions                # mise/asdf tool pins (Elixir/Erlang)
@@ -56,7 +58,9 @@ doc-pointers/
     ├── PROJ-ARCH.md                    # Design, mint pipeline, data model
     ├── PROJ-ARCH.summary.md            # Short architecture digest
     ├── PROJ-SCHEMA.md                  # Data formats (.meta/pointers.yaml, legacy JSON) + config knobs
-    └── PROJ-SCHEMA.summary.md          # Schema quick-reference
+    ├── PROJ-SCHEMA.summary.md          # Schema quick-reference
+    ├── THREAT-MODEL.md                 # Attack surface, STRIDE register, mitigations
+    └── THREAT-MODEL.summary.md         # Threat-model quick-reference
 ```
 
 Tree is small — no `docs/layout/*` extracts.
