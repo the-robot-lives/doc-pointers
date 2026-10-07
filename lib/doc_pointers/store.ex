@@ -711,9 +711,20 @@ defmodule DocPointers.Store do
       {:ok, content} ->
         case Jason.decode(content) do
           {:ok, entries} when is_map(entries) ->
+            name_counts =
+              entries
+              |> Enum.map(fn {token, data} -> legacy_name(token, data) end)
+              |> Enum.frequencies()
+
             Enum.reduce(entries, state, fn {token, data}, acc ->
-              name = DocPointers.UUID5.build_name(data["name"] || token)
-              uuid_bytes = DocPointers.UUID5.generate(name)
+              name = legacy_name(token, data)
+
+              uuid_name =
+                if name_counts[name] == 1,
+                  do: DocPointers.UUID5.build_name(name),
+                  else: "doc-pointers:legacy-token:#{token}"
+
+              uuid_bytes = DocPointers.UUID5.generate(uuid_name)
               uuid = DocPointers.UUID5.to_string(uuid_bytes)
 
               pointer =
@@ -721,7 +732,7 @@ defmodule DocPointers.Store do
                   uuid: uuid,
                   token: token,
                   file_path: data["path"],
-                  function: data["name"] || "unknown",
+                  function: name,
                   description: data["description"] || "",
                   line: data["line"]
                 })
@@ -736,6 +747,13 @@ defmodule DocPointers.Store do
 
       _ ->
         state
+    end
+  end
+
+  defp legacy_name(token, data) do
+    case data["name"] do
+      name when is_binary(name) and name != "" -> name
+      _ -> token
     end
   end
 
