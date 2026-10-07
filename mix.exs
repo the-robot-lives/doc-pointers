@@ -7,6 +7,8 @@ defmodule DocPointers.MixProject do
       version: "0.1.0",
       elixir: "~> 1.18",
       start_permanent: Mix.env() == :prod,
+      # Gate = floor(acceptance line coverage) - 5; CI enforces it via `mix test --cover`.
+      test_coverage: [summary: [threshold: 61]],
       deps: deps()
     ]
   end
