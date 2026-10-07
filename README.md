@@ -24,26 +24,29 @@ mix deps.get
 mix compile
 mix test
 mix doc_pointers.mcp.stdio --root /path/to/project   # stdio MCP (default read-only)
-mix doc_pointers.mcp.server --port 4242 --root /path/to/project   # optional HTTP, 127.0.0.1 only, no auth
+DOC_POINTERS_PORT=4242 mix doc_pointers.mcp.server --root /path/to/project   # optional HTTP
 ```
 
-`--root` defaults to `DOC_POINTERS_ROOT` or cwd. Add `--write` (or `DOC_POINTERS_MCP_WRITES=1`) to expose generate/update without per-call `confirm=true` — same flag on the HTTP task. Run `mix compile` once so Mix doesn't print to stdout and corrupt the stdio stream.
+`--root` defaults to `DOC_POINTERS_ROOT` or cwd. Add `--write` (or `DOC_POINTERS_MCP_WRITES=1`) to expose generate/update without per-call `confirm=true` — same flag on the HTTP task. The HTTP listener binds to `127.0.0.1` only, with no auth; its MCP endpoint is `http://127.0.0.1:4242/` (or your selected port). Run `mix compile` once so Mix doesn't print to stdout and corrupt the stdio stream. On launch, either task prints connection commands to stderr, leaving the stdio JSON-RPC stream clean.
 
 ## MCP Client Install
 
-Replace `/ABS/doc-pointers` with this checkout.
+Replace `/ABS/doc-pointers` with this checkout and `/ABS/project` with the document root. The launch banner prints these commands with the actual paths and port.
 
-**Claude Code:**
+**Stdio (Claude Code and Codex):**
 
 ```bash
-claude mcp add doc-pointers -- mix doc_pointers.mcp.stdio          # lookup/list only
-claude mcp add doc-pointers -- mix doc_pointers.mcp.stdio --write  # with generate/update
+claude mcp add doc-pointers -- sh -c 'cd "$1" && exec mix doc_pointers.mcp.stdio --root "$2"' sh /ABS/doc-pointers /ABS/project
+codex mcp add doc-pointers -- sh -c 'cd "$1" && exec mix doc_pointers.mcp.stdio --root "$2"' sh /ABS/doc-pointers /ABS/project
 ```
 
-From another directory:
+These register a subprocess that starts in the repository and uses the specified document root, regardless of the client's working directory. To enable write tools, add `--write` to the `mix doc_pointers.mcp.stdio` portion of the command.
+
+**HTTP (Claude Code and Codex):** Start `mix doc_pointers.mcp.server` first, then register its URL:
 
 ```bash
-claude mcp add-json doc-pointers '{"command": "mix", "args": ["doc_pointers.mcp.stdio"], "cwd": "/ABS/doc-pointers"}'
+claude mcp add --transport http doc-pointers http://127.0.0.1:4242/
+codex mcp add doc-pointers --url http://127.0.0.1:4242/
 ```
 
 **Claude Desktop** (`claude_desktop_config.json`):
