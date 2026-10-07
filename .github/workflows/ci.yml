@@ -52,7 +52,7 @@ jobs:
         run: mix compile --warnings-as-errors
 
       - name: Save deps and _build
-        if: steps.mix-cache.outputs.cache-hit != 'true'
+        if: steps.mix-cache.outputs.cache-hit != 'true' && github.event_name != 'pull_request'
         uses: actions/cache/save@v4
         with:
           path: |
