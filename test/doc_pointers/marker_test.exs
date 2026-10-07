@@ -4,28 +4,58 @@ defmodule DocPointers.MarkerTest do
   alias DocPointers.Marker
 
   @uuid "550e8400-e29b-51d4-a716-446655440000"
+  @token Marker.token_from_uuid(@uuid)
+  # golden fixture: uuid5("doc-pointers:TestPointer") -> 𓳔𔐮𔘟𔄵
+  @golden_uuid "5c692577-ad0c-51f1-992c-759b5e5fffb5"
+  @golden_token "𓳔𔐮𔘟𔄵"
 
-  test "parses all seven typed UUID kinds" do
+  test "open/close embed the derived 4-glyph token" do
+    assert Marker.open(@golden_uuid) == "〚🔧:#{@golden_token}〛"
+    assert Marker.close(@golden_uuid, "🧩") == "〚/🧩:#{@golden_token}〛"
+    assert Marker.token_from_uuid(@golden_uuid) == @golden_token
+  end
+
+  test "parses token-form markers and resolves via caller" do
+    assert Marker.parse("〚🔧:#{@golden_token}〛") ==
+             {:ok, %{kind: "🔧", token: @golden_token, closing: false}}
+
+    assert Marker.parse("〚/📐:#{@golden_token}〛") ==
+             {:ok, %{kind: "📐", token: @golden_token, closing: true}}
+  end
+
+  test "full UUID payloads remain accepted" do
     for kind <- ["📁", "📦", "🔌", "🧩", "🔧", "🔀", "📐"] do
-      assert Marker.parse(Marker.open(@uuid, kind)) ==
+      assert Marker.parse("〚#{kind}:#{@uuid}〛") ==
                {:ok, %{kind: kind, uuid: @uuid, closing: false}}
     end
   end
 
   test "only region kinds have closing markers" do
     for kind <- ["🧩", "🔀", "📐"] do
-      assert Marker.parse(Marker.close(@uuid, kind)) ==
-               {:ok, %{kind: kind, uuid: @uuid, closing: true}}
+      assert Marker.parse("〚/#{kind}:#{@token}〛") ==
+               {:ok, %{kind: kind, token: @token, closing: true}}
     end
 
     for kind <- ["📁", "📦", "🔌", "🔧"] do
       assert Marker.parse("〚/#{kind}:#{@uuid}〛") == {:error, :not_closable}
+      assert Marker.parse("〚/#{kind}:#{@token}〛") == {:error, :not_closable}
     end
   end
 
-  test "rejects old square brackets and accepts legacy glyph lookup" do
+  test "rejects malformed tokens and old square brackets" do
+    # wrong glyph count, non-hieroglyph characters
+    assert Marker.parse("〚🔧:𓳔𔐮𔘟〛") == {:error, :invalid_marker}
+    assert Marker.parse("〚🔧:abCD〛") == {:error, :invalid_marker}
+    assert Marker.parse("〚🔧:𓳔𔐮𔘟𔄵𓳔〛") == {:error, :invalid_marker}
     assert Marker.parse("[[🔀:#{@uuid}]]") == {:error, :invalid_marker}
     assert Marker.parse_legacy("⟦𓳔𔐮𔘟𔄵⟧") == {:ok, %{token: "𓳔𔐮𔘟𔄵"}}
+  end
+
+  test "valid_token? guards the hieroglyph ranges" do
+    assert Marker.valid_token?(@golden_token)
+    refute Marker.valid_token?("𓳔𔐮𔘟")
+    refute Marker.valid_token?("abCD")
+    refute Marker.valid_token?(@uuid)
   end
 
   test "normalizes emoji and string kinds to the canonical string space" do
@@ -65,21 +95,21 @@ defmodule DocPointers.MarkerTest do
     assert Marker.normalize_kind("widget") == nil
   end
 
-  test "open/close/declaration accept string kinds and render emoji markers" do
-    assert Marker.open(@uuid, "function") == "〚🔧:#{@uuid}〛"
-    assert Marker.open(@uuid) == "〚🔧:#{@uuid}〛"
-    assert Marker.open(@uuid, "class") == "〚📦:#{@uuid}〛"
+  test "open/close/declaration accept string kinds and render emoji markers with token payloads" do
+    assert Marker.open(@uuid, "function") == "〚🔧:#{@token}〛"
+    assert Marker.open(@uuid) == "〚🔧:#{@token}〛"
+    assert Marker.open(@uuid, "class") == "〚📦:#{@token}〛"
 
     assert Marker.declaration(@uuid, "protocol", "Auth", "does auth") ==
-             "〚🔌:#{@uuid}〛 Auth :: does auth"
+             "〚🔌:#{@token}〛 Auth :: does auth"
 
     assert Marker.parse(Marker.open(@uuid, "component")) ==
-             {:ok, %{kind: "🧩", uuid: @uuid, closing: false}}
+             {:ok, %{kind: "🧩", token: @token, closing: false}}
 
-    assert Marker.close(@uuid, "component") == "〚/🧩:#{@uuid}〛"
-    assert Marker.close(@uuid, "logic") == "〚/🔀:#{@uuid}〛"
-    assert Marker.close(@uuid, "diagram") == "〚/📐:#{@uuid}〛"
-    assert Marker.close(@uuid, "🧩") == "〚/🧩:#{@uuid}〛"
+    assert Marker.close(@uuid, "component") == "〚/🧩:#{@token}〛"
+    assert Marker.close(@uuid, "logic") == "〚/🔀:#{@token}〛"
+    assert Marker.close(@uuid, "diagram") == "〚/📐:#{@token}〛"
+    assert Marker.close(@uuid, "🧩") == "〚/🧩:#{@token}〛"
     assert Marker.closable?("component") and Marker.closable?("🔀")
 
     assert_raise ArgumentError, fn -> Marker.close(@uuid, "module") end
