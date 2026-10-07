@@ -1495,12 +1495,7 @@ fn backend_reconcile(root: &Path, records: &[Value], write: bool) -> Result<bool
 fn backend_request(root: &Path, request: &Value) -> Result<Value, String> {
     let project = env::var_os("DOC_POINTERS_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .unwrap()
-                .to_path_buf()
-        });
+        .unwrap_or_else(built_project_path);
     if !project.join("mix.exs").is_file() {
         return Err(format!(
             "Elixir backend not found at {}; set DOC_POINTERS_HOME to the doc-pointers checkout",
@@ -1546,6 +1541,28 @@ fn backend_request(root: &Path, request: &Value) -> Result<Value, String> {
             .to_string());
     }
     Ok(response)
+}
+
+fn built_project_path() -> PathBuf {
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("Rust crate has a parent")
+        .to_path_buf();
+    if source.join("mix.exs").is_file() {
+        return source;
+    }
+
+    // An installed binary may outlive the feature worktree where it was built.
+    // Fall back to that worktree's canonical checkout after the change lands.
+    source
+        .ancestors()
+        .find(|path| {
+            path.file_name() == Some(OsStr::new("worktrees"))
+                && path.parent().and_then(Path::file_name) == Some(OsStr::new(".claude"))
+        })
+        .and_then(|path| path.parent()?.parent())
+        .map(Path::to_path_buf)
+        .unwrap_or(source)
 }
 
 fn install_hook(root: &Path) -> Result<(), String> {
