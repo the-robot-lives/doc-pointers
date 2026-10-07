@@ -282,6 +282,9 @@ defmodule DocPointers.Store do
       kind != "🧩" and length(locations) > 1 ->
         {:error, "only component records may have multiple locations"}
 
+      kind != "🧩" and locations != [] and hd(locations)["file_path"] != file_path ->
+        {:error, "single-anchor location must match record file_path"}
+
       not valid_relative_path?(file_path) ->
         {:error, "record file_path must be relative to the root"}
 
@@ -308,6 +311,14 @@ defmodule DocPointers.Store do
           {location["file_path"], location["line"] || 0, location["end_line"] || 0}
         end)
       end)
+
+    attrs =
+      if attrs["kind"] == "🧩" and attrs["locations"] != [] do
+        first = hd(attrs["locations"])
+        attrs |> Map.put("file_path", first["file_path"]) |> Map.put("line", first["line"])
+      else
+        attrs
+      end
 
     token = attrs["token"]
     existing_uuid = state.token_index[token]

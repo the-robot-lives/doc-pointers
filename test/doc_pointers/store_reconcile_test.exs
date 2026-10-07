@@ -91,11 +91,22 @@ defmodule DocPointers.StoreReconcileTest do
     assert [stored] = Store.snapshot().records
     assert stored["uuid"] == uuid
     assert stored["locations"] == locations
+    assert stored["file_path"] == "lib/a.ex"
+    assert stored["line"] == 3
     assert File.exists?(Path.join([root, ".meta", "pointers.yaml"]))
 
     Store.set_root(root)
     assert Store.snapshot().records == [stored]
     assert {:ok, %{changed: false}} = Store.reconcile([component], true)
+  end
+
+  test "single-anchor location must match its file path" do
+    record =
+      record("𓳔𔐮𔘟𔄵", "lib/a.ex", "a")
+      |> Map.put("locations", [%{"file_path" => "lib/b.ex", "line" => 2}])
+
+    assert {:error, message} = Store.reconcile([record], true)
+    assert message =~ "must match"
   end
 
   defp record(token, file_path, function) do
