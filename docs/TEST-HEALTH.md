@@ -32,6 +32,7 @@ None. Whole suite is ~4s; slowest test is the git-submodule superproject test (~
 | `DocPointers.MCP.Tools.List`, `MCP.Tools.Lookup` | coverage gap | 0% — read-only MCP tools have no direct tests. |
 | `Mix.Tasks.DocPointers.Mcp.Server/Stdio/MigrateStores` | coverage gap | 0% — mix task entrypoints untested. |
 | `DocPointers.MCP.Runtime` | coverage gap | 34.78%. |
+| Store fallback detection ignored every nested store when the root path contained an ignored segment (`tmp`, `deps`, `cover`, …) | product bug (fixed) | Exposed by the first CI run: Linux `System.tmp_dir!` is `/tmp`, so 4 nested-store tests failed only in CI. Reproduce locally with `TMPDIR=/tmp/x mix test`. Fixed in `Store.fallback_detect_submodules/1` by judging ignored segments on the root-relative path. |
 | Elixir/OTP pin | toolchain | CI uses `.tool-versions` (Elixir 1.20.1 / OTP 29.0.2); `mix.exs` allows `~> 1.18`. |
 
 ## Nightly

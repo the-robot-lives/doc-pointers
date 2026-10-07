@@ -197,11 +197,12 @@ defmodule DocPointers.Store do
     root
     |> Path.join("**/.git")
     |> Path.wildcard(match_dot: true)
-    |> Enum.reject(&(&1 |> Path.dirname() |> ignored_dir?()))
     |> Enum.map(fn git_path ->
       git_path |> String.trim_trailing(".git") |> Path.relative_to(root)
     end)
-    |> Enum.reject(&(&1 == "."))
+    # Judge ignored segments on the root-relative path: a root under /tmp
+    # (Linux tmp_dir) must not ignore every nested store.
+    |> Enum.reject(&(&1 == "." or ignored_dir?(&1)))
     |> Enum.sort_by(&byte_size/1, :desc)
   end
 
