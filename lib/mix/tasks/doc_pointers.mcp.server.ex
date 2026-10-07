@@ -22,17 +22,16 @@ defmodule Mix.Tasks.DocPointers.Mcp.Server do
   """
   use Mix.Task
 
-  @requirements ["app.start"]
+  @requirements ["app.config"]
 
   @impl Mix.Task
   def run(args) do
     opts = DocPointers.MCP.Runtime.parse(args)
-    DocPointers.MCP.Runtime.configure!(opts)
+    DocPointers.MCP.Runtime.boot!(opts)
     port = DocPointers.MCP.Runtime.port(opts)
     DocPointers.MCP.Runtime.start_http!(port)
 
-    Mix.shell().info("doc-pointers MCP (loopback HTTP) → http://127.0.0.1:#{port}/mcp")
-    Mix.shell().info("Prefer stdio for local clients: mix doc_pointers.mcp.stdio")
+    DocPointers.MCP.ConnectionHelp.print_http!(port, opts)
     Process.sleep(:infinity)
   end
 end
