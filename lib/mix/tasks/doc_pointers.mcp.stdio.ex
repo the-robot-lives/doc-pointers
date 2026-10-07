@@ -21,12 +21,12 @@ defmodule Mix.Tasks.DocPointers.Mcp.Stdio do
   """
   use Mix.Task
 
-  @requirements ["app.start"]
+  @requirements ["app.config"]
 
   @impl Mix.Task
   def run(args) do
     opts = DocPointers.MCP.Runtime.parse(args)
-    DocPointers.MCP.Runtime.configure!(opts)
+    DocPointers.MCP.Runtime.boot!(opts)
     DocPointers.MCP.Runtime.start_stdio!()
     DocPointers.MCP.ConnectionHelp.print_stdio!(opts)
     Process.sleep(:infinity)
