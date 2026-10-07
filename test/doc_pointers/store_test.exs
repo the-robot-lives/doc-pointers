@@ -339,6 +339,59 @@ defmodule DocPointers.StoreTest do
     end
   end
 
+  describe "kind normalization" do
+    test "loads legacy emoji kinds as canonical strings and persists strings" do
+      path = Path.join([root(), ".meta", "pointers.yaml"])
+      File.mkdir_p!(Path.dirname(path))
+
+      legacy = %{
+        "pointers" => %{
+          "legacy-uuid" => %{
+            "token" => "𓳔𔐮𔘟𔄵",
+            "kind" => "🔧",
+            "file_path" => "lib/legacy.ex",
+            "function" => "legacy",
+            "description" => "legacy emoji kind"
+          }
+        }
+      }
+
+      File.write!(path, Ymlr.document!(legacy))
+
+      Store.set_root(root())
+      pointer = Store.get("legacy-uuid")
+      assert pointer.kind == "function"
+
+      # A touch through update rewrites the store with the string kind.
+      {:ok, _} = Store.update("legacy-uuid", %{description: "touched"})
+      {:ok, on_disk} = YamlElixir.read_from_file(path)
+      assert on_disk["pointers"]["legacy-uuid"]["kind"] == "function"
+    end
+
+    test "update normalizes legacy emoji kinds" do
+      pointer = make_pointer("uuid-kind", "𓀀𓀻𓃉𓏦")
+      Store.put(pointer)
+
+      {:ok, updated} = Store.update("uuid-kind", %{kind: "🧩"})
+      assert updated.kind == "component"
+      assert Store.get("uuid-kind").kind == "component"
+
+      {:ok, updated} = Store.update("uuid-kind", %{kind: "protocol"})
+      assert updated.kind == "protocol"
+      assert Store.get("uuid-kind").kind == "protocol"
+    end
+
+    test "new pointers default to the function string kind" do
+      pointer = make_pointer("uuid-default", "𓏦𓀀𓀻𓃉")
+      Store.put(pointer)
+      assert Store.get("uuid-default").kind == "function"
+    end
+  end
+
+  defp root do
+    Store.snapshot().root
+  end
+
   defp make_pointer(uuid, token, opts \\ []) do
     Pointer.new(%{
       uuid: uuid,

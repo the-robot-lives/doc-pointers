@@ -70,8 +70,11 @@ defmodule DocPointers.MCP.Tools.Lookup do
 
   defp matches?(record, {:uuid, uuid}), do: record["uuid"] == uuid
 
+  # Selector kinds come from parsed emoji markers; stored kinds are canonical
+  # strings. Compare through the emoji each maps to so fine-grained string
+  # kinds (class, protocol, ...) match their scope emoji selector.
   defp matches?(record, {:typed, uuid, kind}),
-    do: record["uuid"] == uuid and record["kind"] == kind
+    do: record["uuid"] == uuid and Marker.emoji_for(record["kind"]) == Marker.emoji_for(kind)
 
   defp matches?(record, {:token, token}), do: record["token"] == token
 

@@ -17,7 +17,7 @@ defmodule DocPointers.MCP.Tools.LookupTest do
 
     record = %{
       "uuid" => @uuid,
-      "kind" => "🧩",
+      "kind" => "component",
       "file_path" => "lib/a.ex",
       "function" => "auth concern",
       "description" => "cross-cutting authentication",
@@ -35,7 +35,7 @@ defmodule DocPointers.MCP.Tools.LookupTest do
   test "plain UUID and typed selectors return every component occurrence" do
     for selector <- [@uuid, "🧩:#{@uuid}"] do
       assert {:ok, %{count: 1, results: [record]}} = Lookup.call(%{uuid: selector}, nil)
-      assert record["kind"] == "🧩"
+      assert record["kind"] == "component"
       assert Enum.map(record["snippets"], & &1["file_path"]) == ["lib/a.ex", "lib/b.ex"]
       assert Enum.at(record["snippets"], 0)["content"] =~ "three"
     end
