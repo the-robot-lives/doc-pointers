@@ -3,6 +3,10 @@ defmodule DocPointers.Store do
 
   alias DocPointers.Pointer
 
+  defmodule InvalidStoreError do
+    defexception [:message]
+  end
+
   def start_link(opts) do
     root = Keyword.fetch!(opts, :root)
     GenServer.start_link(__MODULE__, root, name: __MODULE__)
@@ -634,6 +638,9 @@ defmodule DocPointers.Store do
 
     try do
       operation.(reload(state))
+    rescue
+      error in InvalidStoreError ->
+        {:reply, {:error, Exception.message(error)}, state}
     after
       File.rmdir(lock)
     end
@@ -689,8 +696,16 @@ defmodule DocPointers.Store do
         end)
 
       _ ->
-        state
+        raise InvalidStoreError,
+              "invalid pointer store at #{path}; existing YAML was left unchanged"
     end
+  rescue
+    error in InvalidStoreError ->
+      reraise error, __STACKTRACE__
+
+    error ->
+      raise InvalidStoreError,
+            "invalid pointer store at #{path}: #{Exception.message(error)}; existing YAML was left unchanged"
   end
 
   defp maybe_load_legacy(state) do
