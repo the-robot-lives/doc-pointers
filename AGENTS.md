@@ -10,6 +10,7 @@ Claude Code loads [CLAUDE.md](./CLAUDE.md). Same policy; this file is the harnes
 2. **No shell in main thread** — delegate lookups/builds/greps to tasker subagents; batch and summarize.
 3. **Worktrees (REQUIRED)**: canonical placement `.claude/worktrees/<name>/`, created from this repo's own `.git` off `develop`; `.claude/worktrees/` is gitignored — see **Worktrees — Canonical Convention** below.
 4. **PRs target `develop`.** Never merge or push `main` (CI/CD-only release path).
+5. **PR / CI monitoring:** use `gh-wait` with `--snapshot` for one-shot checks; do not write polling loops. See **Monitoring** below.
 
 ## Identity
 
@@ -41,6 +42,21 @@ All work happens on git worktrees, created from **this repo's own `.git`** — n
 - **Addressing:** `git -C <this-repo>/.claude/worktrees/<name> …`; verify branch + clean index before any git write; no `git stash`.
 - **Elixir projects:** the MAIN checkout owns `deps/` + `_build/`; each worktree symlinks `deps` (and `_build` where needed) to the canonical checkout by **absolute path** — no per-worktree re-fetch/recompile.
 - **Legacy placements** (`.worktrees/`, `.wt/`, `<repo>.worktrees/` siblings, `staging/`) are grandfathered — do not create new ones; migrate opportunistically. `staging/` remains local-only experiments (never pushed/submoduled).
+
+## Monitoring PRs and CI — `gh-wait`
+
+Use the monorepo's `gh-wait` (`~/.local/bin`) for PR, review, checks, workflow-run, and deploy status. It replaces ad-hoc `gh`/`kubectl` sleep loops. `-R owner/repo` selects a repository (otherwise inferred from the current remote); `--interval 30s` and `--timeout 30m` are defaults. `--json` emits one result object; `--quiet` suppresses progress. Exit codes are `0` success, `1` terminal failure, `2` timeout or pending with `--snapshot`, and `3` usage/tool error. It is read-only except the opt-in `run --rerun-cancelled` action.
+
+```bash
+gh-wait status 48 -R the-robot-lives/doc-pointers
+gh-wait pr-review 48 --bot robot --since now --any-comment
+gh-wait pr-checks 48 --snapshot --json
+gh-wait pr-state --head feature/x --until merged --snapshot
+```
+
+**Waiting style (main thread and subagents):** Prefer a Monitor or scheduled wake-up followed by `gh-wait <command> --snapshot`; pending exits `2`, so check again on the next wake. If the next step truly depends on a terminal state, use a foreground `gh-wait` call with `--timeout 3m`, then `--timeout 5m` on further pending results. Stop on exits `0`, `1`, or `3`, or after about 60 minutes total unless the task sets another limit. Keep the enclosing tool timeout longer than the `gh-wait` timeout. Do not use `tail -f`, log-file polling, `gh run watch`, or background-and-follow loops.
+
+Full reference: monorepo `Portfolio/Utilities/source/github-utils/docs/gh-wait.md` and its root `CLAUDE.md` monitoring section.
 
 ## Pointers
 
