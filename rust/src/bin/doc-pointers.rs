@@ -34,11 +34,20 @@ const fn token_alphabet_size() -> u128 {
 #[derive(Debug, Clone)]
 struct Pointer {
     uuid: Option<Uuid>,
+    kind: Option<MarkerKind>,
     code: String,
     path: String,
     line: usize,
     name: String,
     description: String,
+    locations: Vec<Location>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Location {
+    file_path: String,
+    line: usize,
+    end_line: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -101,6 +110,7 @@ struct Uuid5Options {
     namespace: String,
     salt: String,
     format: PointerFormat,
+    kind: MarkerKind,
     description: String,
     no_clipboard: bool,
 }
@@ -111,6 +121,50 @@ enum PointerFormat {
     Code,
     Declaration,
     Deeplink,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MarkerKind {
+    File,
+    Module,
+    Contract,
+    Component,
+    Function,
+    Logic,
+    Diagram,
+}
+
+impl MarkerKind {
+    fn emoji(self) -> &'static str {
+        match self {
+            Self::File => "📁",
+            Self::Module => "📦",
+            Self::Contract => "🔌",
+            Self::Component => "🧩",
+            Self::Function => "🔧",
+            Self::Logic => "🔀",
+            Self::Diagram => "📐",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "file" | "📁" => Some(Self::File),
+            "module" | "class" | "struct" | "📦" => Some(Self::Module),
+            "contract" | "interface" | "protocol" | "behavior" | "behaviour" | "🔌" => {
+                Some(Self::Contract)
+            }
+            "component" | "🧩" => Some(Self::Component),
+            "function" | "🔧" => Some(Self::Function),
+            "logic" | "🔀" => Some(Self::Logic),
+            "diagram" | "mermaid" | "plantuml" | "📐" => Some(Self::Diagram),
+            _ => None,
+        }
+    }
+
+    fn closable(self) -> bool {
+        matches!(self, Self::Component | Self::Logic | Self::Diagram)
+    }
 }
 
 fn main() {
@@ -130,6 +184,7 @@ fn main() {
         Some("build") => scan_command(&args[1..]),
         Some("annotate") => annotate_command(&args[1..]),
         Some("uuid5" | "new") => uuid5_command(&args[1..]),
+        Some("lookup") => lookup_command(&args[1..]),
         Some("hook") => install_command(&args[1..], true),
         Some("-h" | "--help" | "help") => {
             print_help();
@@ -182,11 +237,12 @@ fn scan_command(args: &[String]) -> Result<(), String> {
     let root = absolute_path(&options.root)?;
     let db_path = legacy_db_path(&root, &options.db)?;
 
-    let (pointers, mut errors) = collect_pointers(&root, &db_path, &options.filter)?;
+    let (mut pointers, mut errors) = collect_pointers(&root, &db_path, &options.filter)?;
     if !errors.is_empty() {
         return Err(errors.join("\n"));
     }
-    let records = reconcile_records(&root, &db_path, &pointers)?;
+    hydrate_pointer_ids(&root, &db_path, &mut pointers)?;
+    let records = reconcile_records(&root, &db_path, &pointers, &options.filter)?;
     let db_changed = if options.write || options.check {
         backend_reconcile(&root, &records, options.write)?
     } else {
@@ -267,6 +323,8 @@ fn uuid5_command(args: &[String]) -> Result<(), String> {
         generate_uuid5_code(&seed, namespace, &options.salt, &pointers)?;
     let payload = format_pointer(
         options.format,
+        options.kind,
+        uuid,
         &code,
         options.name.as_deref(),
         &options.description,
@@ -278,7 +336,10 @@ fn uuid5_command(args: &[String]) -> Result<(), String> {
         println!("collision-attempt: {attempt}");
     }
     println!("code: {code}");
-    println!("marker: ⟦{code}⟧");
+    println!("marker: 〚{}:{uuid}〛", options.kind.emoji());
+    if options.kind.closable() {
+        println!("closing: 〚/{}:{uuid}〛", options.kind.emoji());
+    }
     println!("clipboard: {payload}");
 
     if !options.no_clipboard {
@@ -287,6 +348,146 @@ fn uuid5_command(args: &[String]) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn lookup_command(args: &[String]) -> Result<(), String> {
+    let mut root = PathBuf::from(".");
+    let mut context = 2usize;
+    let mut query = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--root" => {
+                index += 1;
+                root = PathBuf::from(expect_value(args, index, "--root")?);
+            }
+            "--context" => {
+                index += 1;
+                context = expect_value(args, index, "--context")?
+                    .parse::<usize>()
+                    .map_err(|_| "--context must be a nonnegative integer".to_string())?;
+                if context > 20 {
+                    return Err("--context must be at most 20".to_string());
+                }
+            }
+            "--help" | "-h" => {
+                println!("usage: doc-pointers lookup UUID|emoji:UUID|〚emoji:UUID〛 [--root ROOT] [--context N]");
+                return Ok(());
+            }
+            value if value.starts_with('-') => return Err(format!("unknown option: {value}")),
+            value => {
+                if query.replace(value.to_string()).is_some() {
+                    return Err("lookup accepts exactly one pointer".to_string());
+                }
+            }
+        }
+        index += 1;
+    }
+    let (expected_kind, uuid) = parse_lookup_key(
+        query
+            .as_deref()
+            .ok_or_else(|| "lookup requires a UUID or typed marker".to_string())?,
+    )?;
+    let root = absolute_path(&root)?;
+    let response = backend_request(&root, &json!({"op": "status"}))?;
+    let record = response
+        .get("records")
+        .and_then(Value::as_array)
+        .and_then(|records| {
+            records.iter().find(|record| {
+                record.get("uuid").and_then(Value::as_str) == Some(uuid.to_string().as_str())
+            })
+        })
+        .ok_or_else(|| format!("pointer {uuid} not found"))?;
+    let kind = record.get("kind").and_then(Value::as_str).unwrap_or("🔧");
+    if expected_kind.is_some_and(|expected| expected.emoji() != kind) {
+        return Err(format!(
+            "pointer {uuid} has kind {kind}, not the requested kind"
+        ));
+    }
+    println!("marker: 〚{kind}:{uuid}〛");
+    for (label, key) in [
+        ("token", "token"),
+        ("name", "function"),
+        ("description", "description"),
+        ("created_at", "created_at"),
+        ("updated_at", "updated_at"),
+    ] {
+        if let Some(value) = record.get(key).and_then(Value::as_str) {
+            println!("{label}: {value}");
+        }
+    }
+    let locations = record.get("locations").and_then(Value::as_array);
+    if let Some(locations) = locations.filter(|locations| !locations.is_empty()) {
+        for (number, location) in locations.iter().enumerate() {
+            print_location(&root, location, number + 1, context);
+        }
+    } else {
+        print_location(&root, record, 1, context);
+    }
+    Ok(())
+}
+
+fn parse_lookup_key(raw: &str) -> Result<(Option<MarkerKind>, Uuid), String> {
+    let text = raw
+        .strip_prefix('〚')
+        .and_then(|text| text.strip_suffix('〛'))
+        .unwrap_or(raw);
+    let (kind, uuid_text) = match text.split_once(':') {
+        Some((kind, uuid)) => (
+            Some(MarkerKind::parse(kind).ok_or_else(|| format!("unknown pointer kind: {kind}"))?),
+            uuid,
+        ),
+        None => (None, text),
+    };
+    let uuid =
+        Uuid::parse_str(uuid_text).map_err(|error| format!("invalid pointer UUID: {error}"))?;
+    Ok((kind, uuid))
+}
+
+fn print_location(root: &Path, location: &Value, number: usize, context: usize) {
+    let Some(path) = location.get("file_path").and_then(Value::as_str) else {
+        return;
+    };
+    let line = location.get("line").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let end_line = location
+        .get("end_line")
+        .and_then(Value::as_u64)
+        .map(|value| value as usize);
+    match end_line {
+        Some(end) => println!("location {number}: {path}:{line}-{end}"),
+        None => println!("location {number}: {path}:{line}"),
+    }
+    let source = root.join(path);
+    let safe = fs::canonicalize(&source)
+        .ok()
+        .and_then(|path| {
+            fs::canonicalize(root)
+                .ok()
+                .map(|base| path.starts_with(base))
+        })
+        .unwrap_or(false);
+    if !safe {
+        println!("  (source unavailable)");
+        return;
+    }
+    let Ok(text) = fs::read_to_string(&source) else {
+        println!("  (source unavailable)");
+        return;
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    let start = line.saturating_sub(context + 1);
+    let end = end_line
+        .unwrap_or(line)
+        .saturating_add(context)
+        .min(lines.len());
+    let visible_end = end.min(start.saturating_add(16));
+    for number in start..visible_end {
+        println!("  {:>5} | {}", number + 1, lines[number]);
+    }
+    if visible_end < end {
+        println!("  ... {} more line(s)", end - visible_end);
+    }
 }
 
 /// Languages the annotate command can target. Detection is deliberately line-anchored
@@ -468,7 +669,7 @@ fn is_function_shaped(rhs: &str) -> bool {
 }
 
 /// True when the contiguous comment/attribute/doc block immediately above the
-/// declaration already contains a `⟦…⟧` marker — makes annotate idempotent and
+/// declaration already contains a pointer marker — makes annotate idempotent and
 /// tolerates humans relocating the marker within the doc block.
 fn block_above_has_marker(lang: Lang, lines: &[&str], decl_idx: usize) -> bool {
     let mut index = decl_idx;
@@ -478,7 +679,7 @@ fn block_above_has_marker(lang: Lang, lines: &[&str], decl_idx: usize) -> bool {
         let line = lines[index];
         let trimmed = line.trim();
         if in_heredoc {
-            if line.contains('⟦') {
+            if line.contains('〚') || line.contains('⟦') {
                 return true;
             }
             if trimmed.starts_with('@') && trimmed.contains("\"\"\"") {
@@ -506,7 +707,7 @@ fn block_above_has_marker(lang: Lang, lines: &[&str], decl_idx: usize) -> bool {
         if !is_comment {
             break;
         }
-        if line.contains('⟦') {
+        if line.contains('〚') || line.contains('⟦') {
             return true;
         }
     }
@@ -601,7 +802,11 @@ fn derive_description(lang: Lang, lines: &[&str], decl_idx: usize) -> Option<Str
         };
         if let Some(text) = text {
             let text = text.trim();
-            if text.is_empty() || text.starts_with('⟦') || text.starts_with('@') {
+            if text.is_empty()
+                || text.starts_with('〚')
+                || text.starts_with('⟦')
+                || text.starts_with('@')
+            {
                 continue;
             }
             return Some(sanitize_description(text));
@@ -708,17 +913,19 @@ fn annotate_command(args: &[String]) -> Result<(), String> {
             let leader = comment_leader(lang);
             insertions.push((
                 *idx,
-                format!("{indent}{leader} ⟦{code}⟧ {name} :: {description}"),
+                format!("{indent}{leader} 〚🔧:{uuid}〛 {name} :: {description}"),
             ));
             pointers.insert(
                 code.clone(),
                 Pointer {
                     uuid: Some(uuid),
+                    kind: Some(MarkerKind::Function),
                     code,
                     path: relpath.clone(),
                     line: idx + 1, // provisional; the closing build records exact lines
                     name: name.clone(),
                     description,
+                    locations: vec![],
                 },
             );
         }
@@ -753,10 +960,11 @@ fn annotate_command(args: &[String]) -> Result<(), String> {
                 pointer.uuid = Some(uuid);
             }
         }
+        hydrate_pointer_ids(&root, &db_path, &mut fresh)?;
         for error in &build_errors {
             eprintln!("WARNING: {error}");
         }
-        let records = reconcile_records(&root, &db_path, &fresh)?;
+        let records = reconcile_records(&root, &db_path, &fresh, &options.filter)?;
         let db_changed = backend_reconcile(&root, &records, true)?;
         let (changed_links, link_errors) =
             expand_markdown_links(&root, &fresh, true, &options.filter)?;
@@ -839,7 +1047,7 @@ fn parse_annotate_options(args: &[String]) -> Result<AnnotateOptions, String> {
 fn print_annotate_help() {
     println!(
         "usage: doc-pointers annotate [--root ROOT] [--db DB] [--include P]... [--exclude P]... [--lang exs] [--write]\n\n\
-Walk the tree and insert `⟦code⟧ Name :: Description` markers above every public/exported\n\
+Walk the tree and insert `〚🔧:UUID〛 Name :: Description` markers above every public/exported\n\
 Rust (`pub fn`), Elixir (`def`/`defmacro`), and JS/TS (`export`/`exports.`) function that\n\
 does not already have one in its doc/comment block. Dry-run by default; --write applies\n\
 the insertions and then reconciles .meta/pointers.yaml + expands deeplinks in the same run.\n\n\
@@ -904,6 +1112,7 @@ fn parse_uuid5_options(args: &[String]) -> Result<Uuid5Options, String> {
     let mut namespace = "doc-pointers".to_string();
     let mut salt = String::new();
     let mut format = PointerFormat::Marker;
+    let mut kind = MarkerKind::Function;
     let mut description = String::new();
     let mut no_clipboard = false;
 
@@ -940,6 +1149,12 @@ fn parse_uuid5_options(args: &[String]) -> Result<Uuid5Options, String> {
                     value => return Err(format!("invalid --format value: {value}")),
                 };
             }
+            "--kind" => {
+                index += 1;
+                let value = expect_value(args, index, "--kind")?;
+                kind = MarkerKind::parse(value)
+                    .ok_or_else(|| format!("invalid --kind value: {value}"))?;
+            }
             "--description" => {
                 index += 1;
                 description = expect_value(args, index, "--description")?.to_string();
@@ -963,6 +1178,7 @@ fn parse_uuid5_options(args: &[String]) -> Result<Uuid5Options, String> {
         namespace,
         salt,
         format,
+        kind,
         description,
         no_clipboard,
     })
@@ -977,67 +1193,34 @@ fn expect_value<'a>(args: &'a [String], index: usize, flag: &str) -> Result<&'a 
 fn print_help() {
     println!(
         "\
-doc-pointers — durable, code-stable cross-document pointers
+doc-pointers — durable UUID pointer markers
 
-WHAT
-  Doc pointers are 4-character tokens drawn from curated printable Unicode sign
-  blocks: Meroitic Hieroglyphs, Egyptian Hieroglyphs, Egyptian Hieroglyphs
-  Extended-A, and Anatolian Hieroglyphs. A declaration looks like:
+A canonical marker has a type emoji and UUIDv5:
+  # 〚🔧:5c692577-ad0c-51f1-992c-759b5e5fffb5〛 run :: Runs the task
+  # 〚🧩:UUID〛 component :: reusable span
+  # 〚/🧩:UUID〛
 
-      > ⟦𓳔𔐮𔘟𔄵⟧ Pointer name :: Human readable description.
+Kinds: 📁 file, 📦 module/class/struct, 🔌 contract/interface/protocol,
+       🧩 reusable component, 🔧 function, 🔀 logic, 📐 diagram.
+Spans for 🧩, 🔀, and 📐 require a matching closing marker. A component may
+appear in multiple files; lookup lists all its locations. Old ⟦4-glyph⟧
+declarations and deeplinks are read for migration, never generated.
 
-  Because the token is a fixed Unicode glyph sequence and not a path or line
-  number, it survives renames, refactors, and file moves. Other documents then
-  reference it with a `deeplink:` Markdown link, e.g.
+Commands:
+  doc-pointers uuid5 [NAME]       mint UUID and typed marker (--kind KIND)
+  doc-pointers lookup UUID         show metadata and source snippets
+  doc-pointers build              scan without writing
+  doc-pointers build --write      reconcile .meta/pointers.yaml and links
+  doc-pointers build --check      fail if stores or links are stale
+  doc-pointers annotate           report unmarked public functions
+  doc-pointers annotate --write   insert typed function markers, reconcile
+  doc-pointers hook               install pre-commit build --check hook
 
-      [see routing](deeplink:⟦𓳔𔐮𔘟𔄵⟧)
+Canonical Markdown link: [label](deeplink:〚🔧:UUID〛)
+Expanded target: path:line?pointer=UUID
 
-  and `doc-pointers` rewrites that link into a concrete `path:line?code=⟦…⟧` target.
-
-HOW
-  1. Place a ⟦token⟧ Name :: Description declaration at the anchor you want to
-     point at (a function, a heading, a config stanza). The token must live in a
-     comment context (//, #, <!--, /*, *, --, ;) or on its own line, so it never
-     collides with string literals or code.
-  2. Generate new tokens with `doc-pointers uuid5` (deterministic UUIDv5,
-     collision-checked against existing stores, copied to your clipboard).
-  3. Reference any token from Markdown with `[label](deeplink:⟦token⟧)`.
-  4. Run `doc-pointers build --write` to (a) reconcile declarations into
-     `.meta/pointers.yaml` in each owning repo and (b) expand `deeplink:` into a
-     real `file:line` target. Run `doc-pointers build --check` in CI / a
-     pre-commit hook to fail when stores or any link is stale.
-
-WHY
-  Ordinary file:line and URL links rot the instant code moves. Branch names and
-  permalinks are worse. A doc pointer decouples the *identity* of an anchor
-  (the token) from its *current location* (which `build` resolves on demand), so
-  docs stay accurate without manual re-pointing. The sign blocks are chosen so
-  tokens are visually distinct and unlikely to appear in real source. UUIDv5
-  derivation makes them reproducible across machines, and generation checks the
-  current stores for display-token collisions.
-
-USAGE
-  doc-pointers                       print this help
-  doc-pointers build                 collect declarations + expand deeplinks (read-only)
-  doc-pointers build --write         reconcile .meta/pointers.yaml + expanded links
-  doc-pointers build --check         fail (exit 1) if a write would change anything
-  doc-pointers annotate              dry-run: report public fns lacking markers
-  doc-pointers annotate --write      insert markers + reconcile stores in one pass
-  doc-pointers hook                  install a pre-commit hook that runs --check
-  doc-pointers uuid5 [NAME]          mint a new 4-glyph token, copied to clipboard
-  doc-pointers help                  print this help
-
-SUB-COMMAND HELP
-  doc-pointers build --help          options for the build/scan command
-  doc-pointers annotate --help       options for the annotate command
-  doc-pointers uuid5 --help          options for the uuid5 command
-
-LEGACY
-  The bare flags still work for existing scripts:
-    doc-pointers --write        ==  doc-pointers build --write
-    doc-pointers --check        ==  doc-pointers build --check
-    doc-pointers --install-hook ==  doc-pointers hook
-  Prefer the subcommand form in new code."
+Use `COMMAND --help` for options. Bare --write/--check/--install-hook
+remain aliases for build/hook."
     );
 }
 
@@ -1054,10 +1237,10 @@ options:\n  --root ROOT       repository root, default: current directory\n  --d
 fn print_uuid5_help() {
     println!(
         "usage: doc-pointers uuid5 [options] [NAME]\n\n\
-Generate a deterministic UUIDv5-backed four-character doc pointer token.\n\
+Generate a deterministic UUIDv5 and typed pointer marker.\n\
 The token is collision-checked against current stores and copied to\n\
 the clipboard unless --no-clipboard is given.\n\n\
-options:\n  --root ROOT             repository root, default: current directory\n  --db DB                 deprecated; only docs/doc-pointer-db.json is accepted\n  --namespace NAMESPACE   doc-pointers, dns, url, oid, x500, or a UUID\n  --salt SALT             optional deterministic salt\n  --format FORMAT         marker, code, declaration, or deeplink\n  --description TEXT      description used by --format declaration\n  --no-clipboard          print without copying to clipboard"
+options:\n  --root ROOT             repository root, default: current directory\n  --db DB                 deprecated; only docs/doc-pointer-db.json is accepted\n  --namespace NAMESPACE   doc-pointers, dns, url, oid, x500, or a UUID\n  --salt SALT             optional deterministic salt\n  --format FORMAT         marker, code, declaration, or deeplink\n  --kind KIND             file, module, contract, component, function, logic, diagram\n  --description TEXT      description used by --format declaration\n  --no-clipboard          print without copying to clipboard"
     );
 }
 
@@ -1069,10 +1252,12 @@ fn collect_pointers(
     let mut pointers: HashMap<String, Pointer> = HashMap::new();
     let mut errors = Vec::new();
     for path in scan_files(root, db_path, filter)? {
+        let file_path = rel_path(&path, root);
         let Ok(text) = fs::read_to_string(&path) else {
             continue;
         };
         let mut in_fence = false;
+        let mut spans: Vec<(MarkerKind, Uuid, String)> = Vec::new();
         for (index, line) in text.lines().enumerate() {
             if path.extension() == Some(OsStr::new("md")) && line.trim_start().starts_with("```") {
                 in_fence = !in_fence;
@@ -1081,16 +1266,95 @@ fn collect_pointers(
             if in_fence {
                 continue;
             }
+            if let Some((kind, uuid, closing, marker_end)) = parse_canonical_marker(line) {
+                let code = unicode4_encode_uuid(uuid);
+                if closing {
+                    if !kind.closable() {
+                        errors.push(format!(
+                            "{file_path}:{}: {} cannot have a closing marker",
+                            index + 1,
+                            kind.emoji()
+                        ));
+                    } else if spans.last() != Some(&(kind, uuid, code.clone())) {
+                        errors.push(format!("{file_path}:{}: closing marker does not match the innermost opening marker", index + 1));
+                    } else {
+                        spans.pop();
+                        if let Some(pointer) = pointers.get_mut(&code) {
+                            if let Some(location) =
+                                pointer.locations.iter_mut().rev().find(|loc| {
+                                    loc.file_path == file_path && loc.end_line.is_none()
+                                })
+                            {
+                                location.end_line = Some(index + 1);
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                let rest = clean_comment_tail(&line[marker_end..]);
+                let (name, description) = match rest.split_once("::") {
+                    Some((name, description)) => {
+                        (clean_comment_tail(name), clean_comment_tail(description))
+                    }
+                    None => (rest, String::new()),
+                };
+                let name = if name.is_empty() {
+                    uuid.to_string()
+                } else {
+                    name
+                };
+                let location = Location {
+                    file_path: file_path.clone(),
+                    line: index + 1,
+                    end_line: None,
+                };
+                if let Some(existing) = pointers.get_mut(&code) {
+                    if kind == MarkerKind::Component
+                        && existing.uuid == Some(uuid)
+                        && existing.kind == Some(kind)
+                    {
+                        existing.locations.push(location);
+                    } else {
+                        errors.push(format!(
+                            "duplicate pointer {uuid}: {}:{} and {file_path}:{}",
+                            existing.path,
+                            existing.line,
+                            index + 1
+                        ));
+                    }
+                } else {
+                    pointers.insert(
+                        code.clone(),
+                        Pointer {
+                            uuid: Some(uuid),
+                            kind: Some(kind),
+                            code: code.clone(),
+                            path: file_path.clone(),
+                            line: index + 1,
+                            name,
+                            description,
+                            locations: vec![location],
+                        },
+                    );
+                }
+                if kind.closable() {
+                    spans.push((kind, uuid, code));
+                }
+                continue;
+            }
             let Some((code, name, description)) = parse_declaration(line) else {
                 continue;
             };
             let pointer = Pointer {
                 uuid: None,
+                kind: None,
                 code: code.clone(),
-                path: rel_path(&path, root),
+                path: file_path.clone(),
                 line: index + 1,
                 name,
                 description,
+                locations: vec![],
             };
             if let Some(first) = pointers.get(&code) {
                 errors.push(format!(
@@ -1101,8 +1365,38 @@ fn collect_pointers(
                 pointers.insert(code, pointer);
             }
         }
+        for (kind, uuid, _) in spans {
+            errors.push(format!(
+                "{file_path}: unclosed marker 〚{}:{uuid}〛",
+                kind.emoji()
+            ));
+        }
     }
     Ok((pointers, errors))
+}
+
+fn parse_canonical_marker(line: &str) -> Option<(MarkerKind, Uuid, bool, usize)> {
+    let start = line.find('〚')?;
+    if !declaration_context_allows(line, start) {
+        return None;
+    }
+    let body_start = start + '〚'.len_utf8();
+    let body_end = body_start + line[body_start..].find('〛')?;
+    let body = &line[body_start..body_end];
+    let (closing, body) = match body.strip_prefix('/') {
+        Some(body) => (true, body),
+        None => (false, body),
+    };
+    let (emoji, uuid_text) = body.split_once(':')?;
+    let kind = MarkerKind::parse(emoji)?;
+    if kind.emoji() != emoji {
+        return None;
+    }
+    let uuid = Uuid::parse_str(uuid_text).ok()?;
+    if uuid.to_string() != uuid_text {
+        return None;
+    }
+    Some((kind, uuid, closing, body_end + '〛'.len_utf8()))
 }
 
 fn parse_declaration(line: &str) -> Option<(String, String, String)> {
@@ -1337,14 +1631,22 @@ fn expand_line(
             return output;
         };
         let raw_code = &after_prefix[..end];
+        let canonical = parse_canonical_marker(raw_code)
+            .filter(|(_, _, closing, marker_end)| !closing && *marker_end == raw_code.len());
         let code = normalize_code(raw_code);
-        if code.chars().count() == 4 && valid_code(&code) {
+        if canonical.is_some() || (code.chars().count() == 4 && valid_code(&code)) {
             output.push_str(before);
-            if let Some(pointer) = pointers.get(&code) {
+            let pointer = match canonical {
+                Some((kind, uuid, _, _)) => pointers
+                    .values()
+                    .find(|pointer| pointer.uuid == Some(uuid) && pointer.kind == Some(kind)),
+                None => pointers.get(&code),
+            };
+            if let Some(pointer) = pointer {
                 output.push_str(&format!("]({})", expanded_target(pointer)));
             } else {
                 errors.push(format!(
-                    "{}: unresolved deeplink:{code}",
+                    "{}: unresolved deeplink:{raw_code}",
                     rel_path(path, root)
                 ));
                 output.push_str("](deeplink:");
@@ -1369,7 +1671,13 @@ fn normalize_code(raw: &str) -> String {
 }
 
 fn expanded_target(pointer: &Pointer) -> String {
-    format!("{}:{}?code=⟦{}⟧", pointer.path, pointer.line, pointer.code)
+    let uuid = pointer.uuid.unwrap_or_else(|| {
+        Uuid::new_v5(
+            &DOC_POINTER_NAMESPACE,
+            uuid5_name(&pointer.name, "", 0).as_bytes(),
+        )
+    });
+    format!("{}:{}?pointer={uuid}", pointer.path, pointer.line)
 }
 
 fn legacy_db_path(root: &Path, db: &str) -> Result<PathBuf, String> {
@@ -1424,6 +1732,7 @@ fn legacy_records(db_path: &Path) -> Result<HashMap<String, Pointer>, String> {
             code.clone(),
             Pointer {
                 uuid: Some(Uuid::new_v5(&DOC_POINTER_NAMESPACE, uuid_name.as_bytes())),
+                kind: None,
                 code: code.clone(),
                 path: path.to_string(),
                 line: data.get("line").and_then(Value::as_u64).unwrap_or(0) as usize,
@@ -1433,6 +1742,7 @@ fn legacy_records(db_path: &Path) -> Result<HashMap<String, Pointer>, String> {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string(),
+                locations: vec![],
             },
         );
     }
@@ -1450,23 +1760,98 @@ fn pointer_record(pointer: &Pointer) -> Value {
     if let Some(uuid) = pointer.uuid {
         record["uuid"] = json!(uuid.to_string());
     }
+    if let Some(kind) = pointer.kind {
+        record["kind"] = json!(kind.emoji());
+    }
+    if !pointer.locations.is_empty() {
+        let mut locations = pointer.locations.clone();
+        locations.sort_by(|a, b| (&a.file_path, a.line).cmp(&(&b.file_path, b.line)));
+        let values: Vec<Value> = locations
+            .iter()
+            .map(|location| {
+                let mut value = json!({"file_path": location.file_path, "line": location.line});
+                if let Some(end_line) = location.end_line {
+                    value["end_line"] = json!(end_line);
+                }
+                value
+            })
+            .collect();
+        record["file_path"] = json!(locations[0].file_path);
+        record["line"] = json!(locations[0].line);
+        record["locations"] = json!(values);
+    }
     record
+}
+
+fn hydrate_pointer_ids(
+    root: &Path,
+    db_path: &Path,
+    pointers: &mut HashMap<String, Pointer>,
+) -> Result<(), String> {
+    let status: HashMap<String, Pointer> = backend_status(root)?
+        .into_iter()
+        .map(|pointer| (pointer.code.clone(), pointer))
+        .collect();
+    let legacy = legacy_records(db_path)?;
+    for (code, pointer) in pointers {
+        if pointer.uuid.is_none() {
+            pointer.uuid = status
+                .get(code)
+                .and_then(|existing| existing.uuid)
+                .or_else(|| legacy.get(code).and_then(|old| old.uuid))
+                .or_else(|| {
+                    Some(Uuid::new_v5(
+                        &DOC_POINTER_NAMESPACE,
+                        uuid5_name(&pointer.name, "", 0).as_bytes(),
+                    ))
+                });
+        }
+        if pointer.kind.is_none() {
+            pointer.kind = status
+                .get(code)
+                .and_then(|existing| existing.kind)
+                .or(Some(MarkerKind::Function));
+        }
+    }
+    Ok(())
 }
 
 fn reconcile_records(
     root: &Path,
     db_path: &Path,
     scanned: &HashMap<String, Pointer>,
+    filter: &ScanFilter,
 ) -> Result<Vec<Value>, String> {
-    let known: HashSet<String> = backend_status(root)?.into_iter().map(|p| p.code).collect();
+    let status = backend_status(root)?;
+    let known: HashSet<String> = status.iter().map(|p| p.code.clone()).collect();
+    let by_uuid: HashMap<Uuid, Pointer> = status
+        .into_iter()
+        .filter_map(|pointer| pointer.uuid.map(|uuid| (uuid, pointer)))
+        .collect();
     let mut records = legacy_records(db_path)?;
     records.retain(|code, _| !known.contains(code));
     for (code, pointer) in scanned {
         let mut pointer = pointer.clone();
-        if pointer.uuid.is_none() && !known.contains(code) {
+        if let Some(uuid) = pointer.uuid {
+            if let Some(existing) = by_uuid.get(&uuid) {
+                pointer.code = existing.code.clone();
+                if pointer.kind == Some(MarkerKind::Component) {
+                    pointer.locations.extend(
+                        existing
+                            .locations
+                            .iter()
+                            .filter(|location| !filter.allows_file(Path::new(&location.file_path)))
+                            .cloned(),
+                    );
+                }
+            } else if let Some(legacy) = records.values().find(|record| record.uuid == Some(uuid)) {
+                pointer.code = legacy.code.clone();
+            }
+            records.retain(|_, record| record.uuid != Some(uuid));
+        } else if !known.contains(code) {
             pointer.uuid = records.get(code).and_then(|legacy| legacy.uuid);
         }
-        records.insert(code.clone(), pointer);
+        records.insert(pointer.code.clone(), pointer);
     }
     let mut entries: Vec<_> = records.into_iter().collect();
     entries.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1494,11 +1879,42 @@ fn backend_status(root: &Path) -> Result<Vec<Pointer>, String> {
             };
             Ok(Pointer {
                 uuid: Some(Uuid::parse_str(&text("uuid")?).map_err(|error| error.to_string())?),
+                kind: record
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .and_then(MarkerKind::parse),
                 code: text("token")?,
                 path: text("file_path")?,
                 line: record.get("line").and_then(Value::as_u64).unwrap_or(0) as usize,
                 name: text("function")?,
                 description: text("description")?,
+                locations: record
+                    .get("locations")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .map(|item| {
+                                Ok(Location {
+                                    file_path: item
+                                        .get("file_path")
+                                        .and_then(Value::as_str)
+                                        .ok_or_else(|| {
+                                            "backend location omitted file_path".to_string()
+                                        })?
+                                        .to_string(),
+                                    line: item.get("line").and_then(Value::as_u64).unwrap_or(0)
+                                        as usize,
+                                    end_line: item
+                                        .get("end_line")
+                                        .and_then(Value::as_u64)
+                                        .map(|value| value as usize),
+                                })
+                            })
+                            .collect::<Result<Vec<_>, String>>()
+                    })
+                    .transpose()?
+                    .unwrap_or_default(),
             })
         })
         .collect()
@@ -1697,11 +2113,13 @@ fn token_char_from_index(mut index: u32) -> char {
 
 fn format_pointer(
     format: PointerFormat,
+    kind: MarkerKind,
+    uuid: Uuid,
     code: &str,
     name: Option<&str>,
     description: &str,
 ) -> Result<String, String> {
-    let marker = format!("⟦{code}⟧");
+    let marker = format!("〚{}:{uuid}〛", kind.emoji());
     let payload = match format {
         PointerFormat::Marker => marker,
         PointerFormat::Code => code.to_string(),
@@ -1822,6 +2240,73 @@ mod tests {
             parse_declaration("value * \"⟦ABCD⟧ Name :: Description\""),
             None
         );
+    }
+
+    #[test]
+    fn canonical_marker_parses_seven_kinds_and_rejects_uppercase_uuid() {
+        let uuid = Uuid::new_v4();
+        for emoji in ["📁", "📦", "🔌", "🧩", "🔧", "🔀", "📐"] {
+            let line = format!("# 〚{emoji}:{uuid}〛 Name :: Description");
+            let (kind, parsed, closing, _) = parse_canonical_marker(&line).unwrap();
+            assert_eq!(kind.emoji(), emoji);
+            assert_eq!(parsed, uuid);
+            assert!(!closing);
+        }
+        assert!(
+            parse_canonical_marker(&format!("# 〚📐:{}〛", uuid.to_string().to_uppercase()))
+                .is_none()
+        );
+        assert_eq!(
+            parse_lookup_key(&format!("〚🔧:{uuid}〛")).unwrap(),
+            (Some(MarkerKind::Function), uuid)
+        );
+        assert_eq!(parse_lookup_key(&uuid.to_string()).unwrap(), (None, uuid));
+    }
+
+    #[test]
+    fn repeated_component_spans_collect_all_locations() {
+        let root = env::temp_dir().join(format!("doc-pointers-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let uuid = Uuid::new_v4();
+        for file in ["a.md", "b.md"] {
+            fs::write(
+                root.join(file),
+                format!(
+                    "<!-- 〚🧩:{uuid}〛 shared :: component -->\nbody\n<!-- 〚/🧩:{uuid}〛 -->\n"
+                ),
+            )
+            .unwrap();
+        }
+        let (pointers, errors) =
+            collect_pointers(&root, &root.join(DEFAULT_DB_PATH), &ScanFilter::default()).unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        let pointer = &pointers[&unicode4_encode_uuid(uuid)];
+        assert_eq!(pointer.kind, Some(MarkerKind::Component));
+        assert_eq!(pointer.locations.len(), 2);
+        assert!(pointer
+            .locations
+            .iter()
+            .all(|location| location.end_line == Some(3)));
+        let record = pointer_record(pointer);
+        assert_eq!(record["locations"].as_array().unwrap().len(), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn mismatched_closing_marker_is_an_error() {
+        let root = env::temp_dir().join(format!("doc-pointers-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let uuid = Uuid::new_v4();
+        fs::write(
+            root.join("a.md"),
+            format!("# 〚📐:{uuid}〛 diagram :: graph\n# 〚/🔀:{uuid}〛\n"),
+        )
+        .unwrap();
+        let (_, errors) =
+            collect_pointers(&root, &root.join(DEFAULT_DB_PATH), &ScanFilter::default()).unwrap();
+        assert!(errors.iter().any(|error| error.contains("does not match")));
+        assert!(errors.iter().any(|error| error.contains("unclosed")));
+        fs::remove_dir_all(root).unwrap();
     }
 
     // MUST match repo-lock's glyph.rs golden test (golden_matches_doc_pointers_fixture) —
@@ -1949,7 +2434,8 @@ mod tests {
         assert_eq!(changed, vec!["docs/ref.md".to_string()]);
 
         let rewritten = fs::read_to_string(root.join("docs/ref.md")).unwrap();
-        assert!(rewritten.contains("[target](docs/target.md:1?code=⟦ABCD⟧)"));
+        let uuid = Uuid::new_v5(&DOC_POINTER_NAMESPACE, b"doc-pointers:Target pointer");
+        assert!(rewritten.contains(&format!("[target](docs/target.md:1?pointer={uuid})")));
         assert!(rewritten.contains("[ignored](deeplink:ABCD)"));
 
         let _ = fs::remove_dir_all(&root);
@@ -2128,22 +2614,22 @@ mod tests {
         annotate_command(&args).unwrap();
 
         let rust = fs::read_to_string(root.join("src/lib.rs")).unwrap();
-        assert!(rust.contains("// ⟦"));
+        assert!(rust.contains("// 〚🔧:"));
         assert!(rust.contains(" add :: Adds numbers."));
         assert!(rust.contains(" new :: auto-generated pointer for public function new"));
         // Inserted method marker keeps the declaration's indentation.
-        assert!(rust.contains("\n    // ⟦"));
+        assert!(rust.contains("\n    // 〚🔧:"));
 
         let elixir = fs::read_to_string(root.join("src/app.ex")).unwrap();
         assert_eq!(
-            elixir.matches("# ⟦").count(),
+            elixir.matches("# 〚🔧:").count(),
             1,
             "one marker per function name across clauses/arities"
         );
         assert!(!elixir.contains("hidden ::"));
 
         let js = fs::read_to_string(root.join("src/index.js")).unwrap();
-        assert!(js.contains("// ⟦"));
+        assert!(js.contains("// 〚🔧:"));
         assert!(!js.contains("secret ::"));
 
         // The closing build stores records through the Elixir backend.
@@ -2205,7 +2691,7 @@ mod tests {
             text.ends_with("pub fn tail() {}"),
             "no trailing newline added"
         );
-        assert!(text.starts_with("// ⟦"));
+        assert!(text.starts_with("// 〚🔧:"));
         let _ = fs::remove_dir_all(&root);
     }
 
