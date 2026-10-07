@@ -151,6 +151,43 @@ defmodule DocPointers.StoreTest do
       assert imported.file_path == "lib/auth.ex"
       assert imported.function == "login"
     end
+
+    test "keeps every record when legacy names repeat", %{root: root} do
+      docs_dir = Path.join(root, "docs")
+      File.mkdir_p!(docs_dir)
+
+      entries = %{
+        "𓀀𓀻𓃉𓏦" => %{"path" => "lib/a.ex", "name" => "login", "description" => "first"},
+        "𓳔𔐮𔘟𔄵" => %{"path" => "lib/b.ex", "name" => "login", "description" => "second"},
+        "𓃉𓏦𓀀𓀻" => %{"path" => "lib/c.ex", "name" => "unique", "description" => "third"}
+      }
+
+      File.write!(Path.join(docs_dir, "doc-pointer-db.json"), Jason.encode!(entries))
+      Store.set_root(root)
+
+      assert length(Store.all()) == 3
+      records = Store.snapshot().records
+
+      for token <- ["𓀀𓀻𓃉𓏦", "𓳔𔐮𔘟𔄵"] do
+        expected =
+          "doc-pointers:legacy-token:#{token}"
+          |> DocPointers.UUID5.generate()
+          |> DocPointers.UUID5.to_string()
+
+        assert Enum.any?(records, &(&1["token"] == token and &1["uuid"] == expected))
+      end
+
+      unique_uuid =
+        "unique"
+        |> DocPointers.UUID5.build_name()
+        |> DocPointers.UUID5.generate()
+        |> DocPointers.UUID5.to_string()
+
+      assert Enum.any?(records, &(&1["token"] == "𓃉𓏦𓀀𓀻" and &1["uuid"] == unique_uuid))
+
+      {:ok, yaml} = YamlElixir.read_from_file(Path.join([root, ".meta", "pointers.yaml"]))
+      assert map_size(yaml["pointers"]) == 3
+    end
   end
 
   describe "nested submodule stores" do

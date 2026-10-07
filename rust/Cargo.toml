@@ -1,0 +1,12 @@
+[package]
+name = "doc-pointers-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "doc-pointers"
+path = "src/bin/doc-pointers.rs"
+
+[dependencies]
+uuid = { version = "1", features = ["v4", "v5"] }
+serde_json = "1"

@@ -3,6 +3,10 @@ defmodule DocPointers.Store do
 
   alias DocPointers.Pointer
 
+  defmodule InvalidStoreError do
+    defexception [:message]
+  end
+
   def start_link(opts) do
     root = Keyword.fetch!(opts, :root)
     GenServer.start_link(__MODULE__, root, name: __MODULE__)
@@ -19,6 +23,10 @@ defmodule DocPointers.Store do
   def update(uuid, updates), do: GenServer.call(__MODULE__, {:update, uuid, updates})
   def all, do: GenServer.call(__MODULE__, :all)
   def token_exists?(token), do: GenServer.call(__MODULE__, {:token_exists?, token})
+  def snapshot, do: GenServer.call(__MODULE__, :snapshot, @scan_timeout)
+
+  def reconcile(records, write? \\ false),
+    do: GenServer.call(__MODULE__, {:reconcile, records, write?}, @scan_timeout)
 
   def list(opts \\ []) do
     GenServer.call(__MODULE__, {:list, opts})
@@ -28,6 +36,7 @@ defmodule DocPointers.Store do
 
   @impl true
   def init(root) do
+    root = Path.expand(root)
     submodules = detect_submodules(root)
 
     state = %{
@@ -35,15 +44,17 @@ defmodule DocPointers.Store do
       submodules: submodules,
       pointers: %{},
       token_index: %{},
-      store_membership: %{}
+      store_membership: %{},
+      fingerprint: nil
     }
 
-    state = load_all_pointers(state)
+    state = state |> reload() |> maybe_load_legacy_locked()
     {:ok, state}
   end
 
   @impl true
   def handle_call({:set_root, root}, _from, state) do
+    root = Path.expand(root)
     submodules = detect_submodules(root)
 
     state = %{
@@ -52,18 +63,22 @@ defmodule DocPointers.Store do
         submodules: submodules,
         pointers: %{},
         token_index: %{},
-        store_membership: %{}
+        store_membership: %{},
+        fingerprint: nil
     }
 
-    state = load_all_pointers(state)
+    state = state |> reload() |> maybe_load_legacy_locked()
     {:reply, :ok, state}
   end
 
   def handle_call({:get, uuid}, _from, state) do
+    state = refresh(state)
     {:reply, Map.get(state.pointers, uuid), state}
   end
 
   def handle_call({:get_by_token, token}, _from, state) do
+    state = refresh(state)
+
     case Map.get(state.token_index, token) do
       nil -> {:reply, nil, state}
       uuid -> {:reply, Map.get(state.pointers, uuid), state}
@@ -71,13 +86,63 @@ defmodule DocPointers.Store do
   end
 
   def handle_call({:put, %Pointer{} = pointer}, _from, state) do
-    {store_key, adjusted} = resolve_and_adjust(state, pointer)
-    state = put_pointer(state, adjusted, store_key)
-    save_store(state, store_key)
-    {:reply, :ok, state}
+    with_lock(state, fn state ->
+      {store_key, adjusted} = resolve_and_adjust(state, pointer)
+      state = put_pointer(state, adjusted, store_key)
+      save_store(state, store_key)
+      {:reply, :ok, %{state | fingerprint: store_fingerprint(state)}}
+    end)
   end
 
   def handle_call({:update, uuid, updates}, _from, state) do
+    with_lock(state, fn state -> do_update(uuid, updates, state) end)
+  end
+
+  def handle_call(:all, _from, state) do
+    state = refresh(state)
+    {:reply, Map.values(state.pointers), state}
+  end
+
+  def handle_call(:migrate, _from, state) do
+    with_lock(state, &do_migrate/1)
+  end
+
+  def handle_call({:token_exists?, token}, _from, state) do
+    state = refresh(state)
+    {:reply, Map.has_key?(state.token_index, token), state}
+  end
+
+  def handle_call({:list, opts}, _from, state) do
+    state = refresh(state)
+
+    pointers =
+      state.pointers
+      |> Map.values()
+      |> maybe_filter_prefix(opts[:file_prefix])
+      |> maybe_filter_class(opts[:class])
+      |> Enum.sort_by(& &1.created_at)
+
+    offset = opts[:offset] || 0
+    limit = opts[:limit] || 50
+
+    result = pointers |> Enum.drop(offset) |> Enum.take(limit)
+    {:reply, {result, length(pointers)}, state}
+  end
+
+  def handle_call({:reconcile, records, write?}, _from, state) do
+    if write? do
+      with_lock(state, fn state -> do_reconcile(records, true, state) end)
+    else
+      do_reconcile(records, false, refresh(state))
+    end
+  end
+
+  def handle_call(:snapshot, _from, state) do
+    state = refresh(state)
+    {:reply, %{root: Path.expand(state.root), records: public_records(state)}, state}
+  end
+
+  defp do_update(uuid, updates, state) do
     case Map.get(state.pointers, uuid) do
       nil ->
         {:reply, {:error, :not_found}, state}
@@ -92,6 +157,10 @@ defmodule DocPointers.Store do
           |> maybe_update(:class, updates)
           |> maybe_update(:line, updates)
           |> maybe_update(:file_path, updates)
+          |> maybe_update(:kind, updates)
+          |> then(fn p ->
+            if Map.has_key?(updates, :kind), do: %{p | kind_explicit: true}, else: p
+          end)
           |> Map.put(:updated_at, now)
 
         # file_path is stored relative to its store; re-prefix before re-resolving
@@ -109,15 +178,11 @@ defmodule DocPointers.Store do
           save_store(state, old_store_key)
         end
 
-        {:reply, {:ok, adjusted}, state}
+        {:reply, {:ok, adjusted}, %{state | fingerprint: store_fingerprint(state)}}
     end
   end
 
-  def handle_call(:all, _from, state) do
-    {:reply, Map.values(state.pointers), state}
-  end
-
-  def handle_call(:migrate, _from, state) do
+  defp do_migrate(state) do
     {state, moved, touched} =
       state.pointers
       |> Map.values()
@@ -135,26 +200,248 @@ defmodule DocPointers.Store do
       end)
 
     Enum.each(MapSet.to_list(touched), &save_store(state, &1))
-    {:reply, %{moved: moved, stores: MapSet.to_list(touched)}, state}
+
+    {:reply, %{moved: moved, stores: MapSet.to_list(touched)},
+     %{state | fingerprint: store_fingerprint(state)}}
   end
 
-  def handle_call({:token_exists?, token}, _from, state) do
-    {:reply, Map.has_key?(state.token_index, token), state}
+  defp do_reconcile(records, write?, state) when is_list(records) do
+    result =
+      Enum.reduce_while(records, {state, MapSet.new(), 0, 0}, fn attrs,
+                                                                 {current, touched, inserted,
+                                                                  updated} ->
+        case reconcile_one(attrs, current) do
+          {:ok, next, old_key, new_key, change} ->
+            touched =
+              if change == :unchanged,
+                do: touched,
+                else: touched |> MapSet.put(old_key) |> MapSet.put(new_key)
+
+            {:cont,
+             {next, touched, inserted + if(change == :inserted, do: 1, else: 0),
+              updated + if(change == :updated, do: 1, else: 0)}}
+
+          {:error, reason} ->
+            {:halt, {:error, reason}}
+        end
+      end)
+
+    case result do
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+
+      {next, touched, inserted, updated} ->
+        if write? do
+          Enum.each(touched, &save_store(next, &1))
+        end
+
+        reply = %{
+          changed: MapSet.size(touched) > 0,
+          inserted: inserted,
+          updated: updated,
+          records: public_records(next)
+        }
+
+        persisted = if write?, do: %{next | fingerprint: store_fingerprint(next)}, else: state
+        {:reply, {:ok, reply}, persisted}
+    end
   end
 
-  def handle_call({:list, opts}, _from, state) do
-    pointers =
-      state.pointers
-      |> Map.values()
-      |> maybe_filter_prefix(opts[:file_prefix])
-      |> maybe_filter_class(opts[:class])
-      |> Enum.sort_by(& &1.created_at)
+  defp do_reconcile(_records, _write?, state),
+    do: {:reply, {:error, "records must be an array"}, state}
 
-    offset = opts[:offset] || 0
-    limit = opts[:limit] || 50
+  defp reconcile_one(attrs, state) when is_map(attrs) do
+    requested_uuid = attrs["uuid"]
+    existing_by_uuid = state.pointers[requested_uuid]
 
-    result = pointers |> Enum.drop(offset) |> Enum.take(limit)
-    {:reply, {result, length(pointers)}, state}
+    token =
+      attrs["token"] ||
+        (existing_by_uuid && existing_by_uuid.token) ||
+        token_from_uuid(requested_uuid)
+
+    file_path = attrs["file_path"]
+    function = attrs["function"]
+    description = attrs["description"]
+    kind = attrs["kind"] || (existing_by_uuid && existing_by_uuid.kind) || "🔧"
+    owner = state.store_membership[requested_uuid] || ""
+
+    locations =
+      attrs["locations"] ||
+        (existing_by_uuid && public_locations(existing_by_uuid.locations, owner)) || []
+
+    attrs =
+      attrs |> Map.put("token", token) |> Map.put("kind", kind) |> Map.put("locations", locations)
+
+    cond do
+      not (is_binary(token) and String.length(token) == 4) ->
+        {:error, "record token must contain exactly four glyphs"}
+
+      not DocPointers.Marker.valid_kind?(kind) ->
+        {:error, "record kind must be one of 📁, 📦, 🔌, 🧩, 🔧, 🔀, 📐"}
+
+      not valid_locations?(locations) ->
+        {:error,
+         "record locations must contain root-relative file_path and optional line/end_line"}
+
+      kind != "🧩" and length(locations) > 1 ->
+        {:error, "only component records may have multiple locations"}
+
+      kind != "🧩" and locations != [] and hd(locations)["file_path"] != file_path ->
+        {:error, "single-anchor location must match record file_path"}
+
+      not valid_relative_path?(file_path) ->
+        {:error, "record file_path must be relative to the root"}
+
+      not (is_binary(function) and function != "") ->
+        {:error, "record function is required"}
+
+      not is_binary(description) ->
+        {:error, "record description is required"}
+
+      not (is_nil(requested_uuid) or is_binary(requested_uuid)) ->
+        {:error, "record uuid must be a string"}
+
+      true ->
+        reconcile_valid(attrs, state)
+    end
+  end
+
+  defp reconcile_one(_attrs, _state), do: {:error, "each record must be an object"}
+
+  defp reconcile_valid(attrs, state) do
+    attrs =
+      Map.update!(attrs, "locations", fn locations ->
+        Enum.sort_by(locations, fn location ->
+          {location["file_path"], location["line"] || 0, location["end_line"] || 0}
+        end)
+      end)
+
+    attrs =
+      if attrs["kind"] == "🧩" and attrs["locations"] != [] do
+        first = hd(attrs["locations"])
+        attrs |> Map.put("file_path", first["file_path"]) |> Map.put("line", first["line"])
+      else
+        attrs
+      end
+
+    token = attrs["token"]
+    existing_uuid = state.token_index[token]
+    requested_uuid = attrs["uuid"]
+
+    uuid =
+      existing_uuid || requested_uuid ||
+        DocPointers.UUID5.build_name(attrs["function"])
+        |> DocPointers.UUID5.generate()
+        |> DocPointers.UUID5.to_string()
+
+    cond do
+      existing_uuid && requested_uuid && existing_uuid != requested_uuid ->
+        {:error, "token #{token} belongs to a different UUID"}
+
+      state.pointers[uuid] && state.pointers[uuid].token != token ->
+        {:error, "UUID #{uuid} belongs to a different token"}
+
+      true ->
+        existing = state.pointers[uuid]
+        old_key = state.store_membership[uuid] || ""
+
+        pointer =
+          if existing do
+            %{
+              existing
+              | file_path: attrs["file_path"],
+                function: attrs["function"],
+                description: attrs["description"],
+                kind: attrs["kind"],
+                kind_explicit: true,
+                locations: attrs["locations"],
+                line: Map.get(attrs, "line", existing.line),
+                class: Map.get(attrs, "class", existing.class)
+            }
+          else
+            Pointer.new(%{
+              uuid: uuid,
+              token: token,
+              file_path: attrs["file_path"],
+              function: attrs["function"],
+              description: attrs["description"],
+              kind: attrs["kind"],
+              locations: attrs["locations"],
+              line: attrs["line"],
+              class: attrs["class"]
+            })
+          end
+
+        {new_key, adjusted} = resolve_and_adjust(state, pointer)
+
+        change =
+          cond do
+            is_nil(existing) -> :inserted
+            existing == adjusted and old_key == new_key -> :unchanged
+            true -> :updated
+          end
+
+        adjusted =
+          if change == :updated,
+            do: %{adjusted | updated_at: DateTime.utc_now() |> DateTime.to_iso8601()},
+            else: adjusted
+
+        {:ok, put_pointer(state, adjusted, new_key), old_key, new_key, change}
+    end
+  end
+
+  defp public_records(state) do
+    state.pointers
+    |> Enum.map(fn {uuid, pointer} ->
+      owner = state.store_membership[uuid] || ""
+      file_path = if pointer.file_path, do: prefix_path(owner, pointer.file_path), else: nil
+
+      pointer
+      |> Pointer.to_map()
+      |> Map.put("uuid", uuid)
+      |> Map.put("kind", pointer.kind)
+      |> Map.put("file_path", file_path)
+      |> Map.put("locations", public_locations(pointer.locations, owner))
+    end)
+    |> Enum.sort_by(& &1["uuid"])
+  end
+
+  defp token_from_uuid(uuid) when is_binary(uuid) do
+    if DocPointers.Marker.valid_uuid?(uuid) do
+      uuid |> DocPointers.UUID5.from_string() |> DocPointers.Hieroglyph.encode()
+    end
+  end
+
+  defp token_from_uuid(_), do: nil
+
+  defp valid_locations?(locations) when is_list(locations) do
+    Enum.all?(locations, fn
+      %{"file_path" => path} = location ->
+        valid_relative_path?(path) and
+          valid_line?(Map.get(location, "line")) and
+          valid_line?(Map.get(location, "end_line")) and
+          (is_nil(location["end_line"]) or is_nil(location["line"]) or
+             location["end_line"] >= location["line"])
+
+      _ ->
+        false
+    end)
+  end
+
+  defp valid_locations?(_), do: false
+
+  defp valid_line?(nil), do: true
+  defp valid_line?(line), do: is_integer(line) and line > 0
+
+  defp valid_relative_path?(path),
+    do:
+      is_binary(path) and path != "" and Path.type(path) == :relative and
+        not Enum.member?(Path.split(path), "..")
+
+  defp public_locations(locations, owner) do
+    Enum.map(locations || [], fn location ->
+      Map.update!(location, "file_path", &prefix_path(owner, &1))
+    end)
   end
 
   # -- Store detection --
@@ -254,12 +541,21 @@ defmodule DocPointers.Store do
   defp resolve_store_key(_submodules, _), do: ""
 
   defp resolve_and_adjust(state, %Pointer{} = pointer) do
-    store_key = resolve_store_key(state.submodules, pointer.file_path)
+    store_key =
+      if pointer.kind == "🧩", do: "", else: resolve_store_key(state.submodules, pointer.file_path)
 
     adjusted =
       if store_key != "" and pointer.file_path do
         prefix = store_key <> "/"
-        %{pointer | file_path: String.replace_prefix(pointer.file_path, prefix, "")}
+
+        %{
+          pointer
+          | file_path: String.replace_prefix(pointer.file_path, prefix, ""),
+            locations:
+              Enum.map(pointer.locations || [], fn location ->
+                Map.update!(location, "file_path", &String.replace_prefix(&1, prefix, ""))
+              end)
+        }
       else
         pointer
       end
@@ -308,18 +604,87 @@ defmodule DocPointers.Store do
   defp pointers_path(state, store_key), do: Path.join(meta_dir(state, store_key), "pointers.yaml")
   defp legacy_json_path(state), do: Path.join([state.root, "docs", "doc-pointer-db.json"])
 
+  defp store_paths(state), do: Enum.map(["" | state.submodules], &pointers_path(state, &1))
+
+  defp store_fingerprint(state) do
+    Map.new(store_paths(state), fn path ->
+      value =
+        case File.stat(path, time: :native) do
+          {:ok, stat} -> {stat.inode, stat.size, stat.mtime}
+          _ -> nil
+        end
+
+      {path, value}
+    end)
+  end
+
+  # Another process may replace YAML between requests. Always reload on reads;
+  # the known store paths are reused, so this does not repeat gitlink discovery.
+  defp refresh(state), do: reload(state)
+
+  defp reload(state) do
+    state
+    |> Map.merge(%{pointers: %{}, token_index: %{}, store_membership: %{}})
+    |> load_all_pointers()
+    |> then(fn loaded -> %{loaded | fingerprint: store_fingerprint(loaded)} end)
+  end
+
+  # A lock directory is an atomic cross-process claim on the target root.
+  # Never break a timed-out lock automatically: its owner may still be writing.
+  defp with_lock(state, operation) do
+    lock = Path.join(state.root, ".meta/.pointers.lock")
+    File.mkdir_p!(Path.dirname(lock))
+    acquire_lock!(lock, System.monotonic_time(:millisecond) + 30_000)
+
+    try do
+      operation.(reload(state))
+    rescue
+      error in InvalidStoreError ->
+        {:reply, {:error, Exception.message(error)}, state}
+    after
+      File.rmdir(lock)
+    end
+  end
+
+  defp acquire_lock!(lock, deadline) do
+    case File.mkdir(lock) do
+      :ok ->
+        :ok
+
+      {:error, :eexist} ->
+        if System.monotonic_time(:millisecond) >= deadline do
+          raise "timed out waiting for #{lock}; remove it only after confirming no writer is active"
+        end
+
+        Process.sleep(25)
+        acquire_lock!(lock, deadline)
+
+      {:error, reason} ->
+        raise "cannot acquire #{lock}: #{inspect(reason)}"
+    end
+  end
+
   defp load_all_pointers(state) do
     # Check the yaml only where a store can exist: the root plus each
     # detected store. Never glob the whole tree.
-    ["" | state.submodules]
-    |> Enum.map(&pointers_path(state, &1))
+    state
+    |> store_paths()
     |> Enum.filter(&File.exists?/1)
     |> Enum.reduce(state, fn path, acc ->
       rel = Path.relative_to(path, acc.root)
       store_key = resolve_store_key(acc.submodules, rel)
       load_from_yaml(acc, store_key, path)
     end)
-    |> maybe_load_legacy()
+  end
+
+  defp maybe_load_legacy_locked(state) do
+    if not Application.get_env(:doc_pointers, :skip_legacy_import, false) and
+         map_size(state.pointers) == 0 and File.exists?(legacy_json_path(state)) do
+      with_lock(state, &maybe_load_legacy/1)
+      |> then(fn {:reply, :ok, next} -> next end)
+    else
+      state
+    end
   end
 
   defp load_from_yaml(state, store_key, path) do
@@ -331,19 +696,28 @@ defmodule DocPointers.Store do
         end)
 
       _ ->
-        state
+        raise InvalidStoreError,
+              "invalid pointer store at #{path}; existing YAML was left unchanged"
     end
+  rescue
+    error in InvalidStoreError ->
+      reraise error, __STACKTRACE__
+
+    error ->
+      raise InvalidStoreError,
+            "invalid pointer store at #{path}: #{Exception.message(error)}; existing YAML was left unchanged"
   end
 
   defp maybe_load_legacy(state) do
     legacy = legacy_json_path(state)
 
-    if map_size(state.pointers) == 0 and File.exists?(legacy) do
+    if not Application.get_env(:doc_pointers, :skip_legacy_import, false) and
+         map_size(state.pointers) == 0 and File.exists?(legacy) do
       state = import_legacy_json(state)
       state.store_membership |> Map.values() |> Enum.uniq() |> Enum.each(&save_store(state, &1))
-      state
+      {:reply, :ok, %{state | fingerprint: store_fingerprint(state)}}
     else
-      state
+      {:reply, :ok, state}
     end
   end
 
@@ -352,9 +726,20 @@ defmodule DocPointers.Store do
       {:ok, content} ->
         case Jason.decode(content) do
           {:ok, entries} when is_map(entries) ->
+            name_counts =
+              entries
+              |> Enum.map(fn {token, data} -> legacy_name(token, data) end)
+              |> Enum.frequencies()
+
             Enum.reduce(entries, state, fn {token, data}, acc ->
-              name = DocPointers.UUID5.build_name(data["name"] || token)
-              uuid_bytes = DocPointers.UUID5.generate(name)
+              name = legacy_name(token, data)
+
+              uuid_name =
+                if name_counts[name] == 1,
+                  do: DocPointers.UUID5.build_name(name),
+                  else: "doc-pointers:legacy-token:#{token}"
+
+              uuid_bytes = DocPointers.UUID5.generate(uuid_name)
               uuid = DocPointers.UUID5.to_string(uuid_bytes)
 
               pointer =
@@ -362,7 +747,7 @@ defmodule DocPointers.Store do
                   uuid: uuid,
                   token: token,
                   file_path: data["path"],
-                  function: data["name"] || "unknown",
+                  function: name,
                   description: data["description"] || "",
                   line: data["line"]
                 })
@@ -380,6 +765,13 @@ defmodule DocPointers.Store do
     end
   end
 
+  defp legacy_name(token, data) do
+    case data["name"] do
+      name when is_binary(name) and name != "" -> name
+      _ -> token
+    end
+  end
+
   defp save_store(state, store_key) do
     dir = meta_dir(state, store_key)
     File.mkdir_p!(dir)
@@ -394,6 +786,14 @@ defmodule DocPointers.Store do
       |> Map.new()
 
     content = Ymlr.document!(%{"pointers" => store_pointers})
-    File.write!(pointers_path(state, store_key), content)
+    path = pointers_path(state, store_key)
+    tmp = path <> ".tmp.#{System.unique_integer([:positive])}"
+
+    try do
+      File.write!(tmp, content)
+      File.rename!(tmp, path)
+    after
+      File.rm(tmp)
+    end
   end
 end
