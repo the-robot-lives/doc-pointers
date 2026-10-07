@@ -14,6 +14,18 @@ defmodule DocPointers.MCP.Runtime do
     opts
   end
 
+  # Mix tasks must select the root before app.start initializes the Store.
+  # Changing it afterwards repeats the monorepo scan and can time out on a
+  # large checkout. The command-line option takes precedence over the env var.
+  def boot!(opts) do
+    if root = opts[:root] do
+      System.put_env("DOC_POINTERS_ROOT", root)
+    end
+
+    Mix.Task.run("app.start")
+    configure!(Keyword.delete(opts, :root))
+  end
+
   def configure!(opts) do
     if root = opts[:root] do
       DocPointers.Store.set_root(root)
