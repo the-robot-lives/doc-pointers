@@ -442,6 +442,9 @@ fn parse_lookup_key(raw: &str) -> Result<(Option<MarkerKind>, Uuid), String> {
     };
     let uuid =
         Uuid::parse_str(uuid_text).map_err(|error| format!("invalid pointer UUID: {error}"))?;
+    if uuid.get_version_num() != 5 || uuid.get_variant() != uuid::Variant::RFC4122 {
+        return Err("pointer UUID must be version 5".to_string());
+    }
     Ok((kind, uuid))
 }
 
@@ -1393,7 +1396,10 @@ fn parse_canonical_marker(line: &str) -> Option<(MarkerKind, Uuid, bool, usize)>
         return None;
     }
     let uuid = Uuid::parse_str(uuid_text).ok()?;
-    if uuid.to_string() != uuid_text {
+    if uuid.to_string() != uuid_text
+        || uuid.get_version_num() != 5
+        || uuid.get_variant() != uuid::Variant::RFC4122
+    {
         return None;
     }
     Some((kind, uuid, closing, body_end + '〛'.len_utf8()))
@@ -2244,7 +2250,10 @@ mod tests {
 
     #[test]
     fn canonical_marker_parses_seven_kinds_and_rejects_uppercase_uuid() {
-        let uuid = Uuid::new_v4();
+        let uuid = Uuid::new_v5(
+            &DOC_POINTER_NAMESPACE,
+            b"canonical_marker_parses_seven_kinds_and_rejects_uppercase_uuid",
+        );
         for emoji in ["📁", "📦", "🔌", "🧩", "🔧", "🔀", "📐"] {
             let line = format!("# 〚{emoji}:{uuid}〛 Name :: Description");
             let (kind, parsed, closing, _) = parse_canonical_marker(&line).unwrap();
@@ -2256,6 +2265,9 @@ mod tests {
             parse_canonical_marker(&format!("# 〚📐:{}〛", uuid.to_string().to_uppercase()))
                 .is_none()
         );
+        let v4 = Uuid::new_v4();
+        assert!(parse_canonical_marker(&format!("# 〚📐:{v4}〛")).is_none());
+        assert!(parse_lookup_key(&v4.to_string()).is_err());
         assert_eq!(
             parse_lookup_key(&format!("〚🔧:{uuid}〛")).unwrap(),
             (Some(MarkerKind::Function), uuid)
@@ -2267,7 +2279,10 @@ mod tests {
     fn repeated_component_spans_collect_all_locations() {
         let root = env::temp_dir().join(format!("doc-pointers-test-{}", Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
-        let uuid = Uuid::new_v4();
+        let uuid = Uuid::new_v5(
+            &DOC_POINTER_NAMESPACE,
+            b"repeated_component_spans_collect_all_locations",
+        );
         for file in ["a.md", "b.md"] {
             fs::write(
                 root.join(file),
@@ -2296,7 +2311,10 @@ mod tests {
     fn mismatched_closing_marker_is_an_error() {
         let root = env::temp_dir().join(format!("doc-pointers-test-{}", Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
-        let uuid = Uuid::new_v4();
+        let uuid = Uuid::new_v5(
+            &DOC_POINTER_NAMESPACE,
+            b"mismatched_closing_marker_is_an_error",
+        );
         fs::write(
             root.join("a.md"),
             format!("# 〚📐:{uuid}〛 diagram :: graph\n# 〚/🔀:{uuid}〛\n"),
