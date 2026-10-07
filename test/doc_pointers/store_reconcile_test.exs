@@ -109,6 +109,24 @@ defmodule DocPointers.StoreReconcileTest do
     assert message =~ "must match"
   end
 
+  test "malformed existing YAML blocks mutations without rewriting it", %{root: root} do
+    original = record("𓳔𔐮𔘟𔄵", "lib/a.ex", "a")
+    {:ok, _} = Store.reconcile([original], true)
+
+    path = Path.join([root, ".meta", "pointers.yaml"])
+    malformed = "pointers: [unterminated\n"
+    File.write!(path, malformed)
+
+    assert {:error, message} =
+             Store.reconcile([record("𓃉𓏦𓀀𓀻", "lib/b.ex", "b")], true)
+
+    assert message =~ "invalid pointer store"
+    assert File.read!(path) == malformed
+
+    File.write!(path, Ymlr.document!(%{"pointers" => %{}}))
+    assert {:ok, %{inserted: 1}} = Store.reconcile([original], true)
+  end
+
   defp record(token, file_path, function) do
     %{
       "token" => token,
