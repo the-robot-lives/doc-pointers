@@ -8,9 +8,13 @@ defmodule DocPointers.MCP.Tools.Lookup do
   alias DocPointers.{Marker, Store}
 
   input do
-    field(:token, :string, description: "Legacy 4-glyph token")
-    field(:uuid, :string, description: "UUID or emoji:UUID")
-    field(:marker, :string, description: "Full 〚emoji:UUID〛 marker; legacy glyph marker accepted")
+    field(:token, :string, description: "4-glyph hieroglyph token")
+    field(:uuid, :string, description: "UUID, emoji:UUID, or emoji:token")
+
+    field(:marker, :string,
+      description: "Marker 〚emoji:TOKEN〛 or 〚emoji:UUID〛; legacy glyph marker accepted"
+    )
+
     field(:file_path, :string, description: "Root-relative source path")
     field(:function_name, :string, description: "Function/name to search for")
   end
@@ -51,6 +55,7 @@ defmodule DocPointers.MCP.Tools.Lookup do
 
     case Marker.parse(marker) do
       {:ok, %{uuid: uuid, kind: kind}} -> {:ok, {:typed, uuid, kind}}
+      {:ok, %{token: token}} -> {:ok, {:token, token}}
       _ -> {:ok, {:uuid, input}}
     end
   end
@@ -59,6 +64,9 @@ defmodule DocPointers.MCP.Tools.Lookup do
     case Marker.parse(input) do
       {:ok, %{uuid: uuid, kind: kind}} ->
         {:ok, {:typed, uuid, kind}}
+
+      {:ok, %{token: token}} ->
+        {:ok, {:token, token}}
 
       _ ->
         case Marker.parse_legacy(input) do

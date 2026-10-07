@@ -167,6 +167,37 @@ impl MarkerKind {
     }
 }
 
+/// A canonical marker payload. New markers embed the 4-glyph token
+/// (`MarkerPayload::Token`); the full v5 UUID (`MarkerPayload::Uuid`) stays
+/// accepted everywhere markers are parsed or looked up. Tokens are derived
+/// only — resolution token -> UUID goes through the store index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MarkerPayload {
+    Uuid(Uuid),
+    Token(String),
+}
+
+impl MarkerPayload {
+    fn as_str(&self) -> String {
+        match self {
+            Self::Uuid(uuid) => uuid.to_string(),
+            Self::Token(code) => code.clone(),
+        }
+    }
+}
+
+/// Exactly four glyphs, each from the hieroglyph alphabet — the shape a token
+/// payload must have before it is worth resolving against the store.
+fn valid_token_glyphs(text: &str) -> bool {
+    let chars: Vec<char> = text.chars().collect();
+    chars.len() == TOKEN_LENGTH
+        && chars.iter().all(|&c| {
+            TOKEN_RANGES
+                .iter()
+                .any(|&(start, end)| (start..=end).contains(&(c as u32)))
+        })
+}
+
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
 
@@ -237,7 +268,8 @@ fn scan_command(args: &[String]) -> Result<(), String> {
     let root = absolute_path(&options.root)?;
     let db_path = legacy_db_path(&root, &options.db)?;
 
-    let (mut pointers, mut errors) = collect_pointers(&root, &db_path, &options.filter)?;
+    let token_index = store_token_index(&root, &db_path)?;
+    let (mut pointers, mut errors) = collect_pointers(&root, &db_path, &options.filter, &token_index)?;
     if !errors.is_empty() {
         return Err(errors.join("\n"));
     }
@@ -304,7 +336,9 @@ fn uuid5_command(args: &[String]) -> Result<(), String> {
     let root = absolute_path(&options.root)?;
     let db_path = legacy_db_path(&root, &options.db)?;
     let namespace = parse_namespace(&options.namespace)?;
-    let (mut pointers, errors) = collect_pointers(&root, &db_path, &ScanFilter::default())?;
+    let token_index = store_token_index(&root, &db_path)?;
+    let (mut pointers, errors) =
+        collect_pointers(&root, &db_path, &ScanFilter::default(), &token_index)?;
     for pointer in backend_status(&root)? {
         pointers.entry(pointer.code.clone()).or_insert(pointer);
     }
@@ -325,7 +359,6 @@ fn uuid5_command(args: &[String]) -> Result<(), String> {
     let payload = format_pointer(
         options.format,
         options.kind,
-        uuid,
         &code,
         options.name.as_deref(),
         &options.description,
@@ -337,9 +370,9 @@ fn uuid5_command(args: &[String]) -> Result<(), String> {
         println!("collision-attempt: {attempt}");
     }
     println!("code: {code}");
-    println!("marker: 〚{}:{uuid}〛", options.kind.emoji());
+    println!("marker: 〚{}:{code}〛", options.kind.emoji());
     if options.kind.closable() {
-        println!("closing: 〚/{}:{uuid}〛", options.kind.emoji());
+        println!("closing: 〚/{}:{code}〛", options.kind.emoji());
     }
     println!("clipboard: {payload}");
 
@@ -372,7 +405,7 @@ fn lookup_command(args: &[String]) -> Result<(), String> {
                 }
             }
             "--help" | "-h" => {
-                println!("usage: doc-pointers lookup UUID|emoji:UUID|〚emoji:UUID〛 [--root ROOT] [--context N]");
+                println!("usage: doc-pointers lookup UUID|token|emoji:UUID|emoji:token|〚emoji:UUID〛|〚emoji:token〛 [--root ROOT] [--context N]");
                 return Ok(());
             }
             value if value.starts_with('-') => return Err(format!("unknown option: {value}")),
@@ -384,29 +417,39 @@ fn lookup_command(args: &[String]) -> Result<(), String> {
         }
         index += 1;
     }
-    let (expected_kind, uuid) = parse_lookup_key(
+    let (expected_kind, payload) = parse_lookup_key(
         query
             .as_deref()
-            .ok_or_else(|| "lookup requires a UUID or typed marker".to_string())?,
+            .ok_or_else(|| "lookup requires a UUID, token, or typed marker".to_string())?,
     )?;
     let root = absolute_path(&root)?;
     let response = backend_request(&root, &json!({"op": "status"}))?;
-    let record = response
+    let records = response
         .get("records")
         .and_then(Value::as_array)
-        .and_then(|records| {
-            records.iter().find(|record| {
-                record.get("uuid").and_then(Value::as_str) == Some(uuid.to_string().as_str())
-            })
-        })
-        .ok_or_else(|| format!("pointer {uuid} not found"))?;
+        .ok_or_else(|| "backend status omitted records".to_string())?;
+    let record = match &payload {
+        MarkerPayload::Uuid(uuid) => records.iter().find(|record| {
+            record.get("uuid").and_then(Value::as_str) == Some(uuid.to_string().as_str())
+        }),
+        MarkerPayload::Token(code) => records
+            .iter()
+            .find(|record| record.get("token").and_then(Value::as_str) == Some(code.as_str())),
+    }
+    .ok_or_else(|| format!("pointer {} not found", payload.as_str()))?;
     let kind = record.get("kind").and_then(Value::as_str).unwrap_or("🔧");
     if expected_kind.is_some_and(|expected| expected.emoji() != kind) {
         return Err(format!(
-            "pointer {uuid} has kind {kind}, not the requested kind"
+            "pointer {} has kind {kind}, not the requested kind",
+            payload.as_str()
         ));
     }
-    println!("marker: 〚{kind}:{uuid}〛");
+    let token = record
+        .get("token")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| payload.as_str());
+    println!("marker: 〚{kind}:{token}〛");
     for (label, key) in [
         ("token", "token"),
         ("name", "function"),
@@ -429,24 +472,29 @@ fn lookup_command(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn parse_lookup_key(raw: &str) -> Result<(Option<MarkerKind>, Uuid), String> {
+fn parse_lookup_key(raw: &str) -> Result<(Option<MarkerKind>, MarkerPayload), String> {
     let text = raw
         .strip_prefix('〚')
         .and_then(|text| text.strip_suffix('〛'))
         .unwrap_or(raw);
-    let (kind, uuid_text) = match text.split_once(':') {
-        Some((kind, uuid)) => (
+    let (kind, payload_text) = match text.split_once(':') {
+        Some((kind, payload)) => (
             Some(MarkerKind::parse(kind).ok_or_else(|| format!("unknown pointer kind: {kind}"))?),
-            uuid,
+            payload,
         ),
         None => (None, text),
     };
-    let uuid =
-        Uuid::parse_str(uuid_text).map_err(|error| format!("invalid pointer UUID: {error}"))?;
-    if uuid.get_version_num() != 5 || uuid.get_variant() != uuid::Variant::RFC4122 {
-        return Err("pointer UUID must be version 5".to_string());
-    }
-    Ok((kind, uuid))
+    let payload = if let Ok(uuid) = Uuid::parse_str(payload_text) {
+        if uuid.get_version_num() != 5 || uuid.get_variant() != uuid::Variant::RFC4122 {
+            return Err("pointer UUID must be version 5".to_string());
+        }
+        MarkerPayload::Uuid(uuid)
+    } else if valid_token_glyphs(payload_text) {
+        MarkerPayload::Token(payload_text.to_string())
+    } else {
+        return Err(format!("invalid pointer payload: {payload_text}"));
+    };
+    Ok((kind, payload))
 }
 
 fn print_location(root: &Path, location: &Value, number: usize, context: usize) {
@@ -522,12 +570,30 @@ fn language_for_path(path: &Path, include_exs: bool) -> Option<Lang> {
     }
 }
 
-fn detect_public_decl(lang: Lang, trimmed: &str) -> Option<String> {
+fn detect_public_decl(lang: Lang, trimmed: &str) -> Option<(String, MarkerKind)> {
     match lang {
-        Lang::Rust => detect_rust_pub_fn(trimmed),
+        Lang::Rust => detect_rust_pub_fn(trimmed).map(|name| (name, MarkerKind::Function)),
         Lang::Elixir => detect_elixir_public_def(trimmed),
-        Lang::Js => detect_js_export(trimmed),
+        Lang::Js => detect_js_export(trimmed).map(|name| (name, MarkerKind::Function)),
     }
+}
+
+/// Alias-shaped identifier: `Foo`, `MyApp.Auth`, `Foo.Bar!?` — the name shape
+/// of defmodule/defprotocol/defimpl heads.
+fn dotted_alias(source: &str) -> Option<String> {
+    let mut name = String::new();
+    for c in source.chars() {
+        if c == '.' || c == '?' || c == '!' || c == '_' || c.is_ascii_alphanumeric() {
+            name.push(c);
+        } else {
+            break;
+        }
+    }
+    let first = name.chars().next()?;
+    if !first.is_ascii_uppercase() || name.ends_with('.') {
+        return None;
+    }
+    Some(name)
 }
 
 fn ident(source: &str) -> Option<String> {
@@ -575,12 +641,36 @@ fn detect_rust_pub_fn(trimmed: &str) -> Option<String> {
     ident(rest.strip_prefix("fn ")?.trim_start())
 }
 
-fn detect_elixir_public_def(trimmed: &str) -> Option<String> {
-    // Exact `def ` / `defmacro ` keyword + space, so defp/defmodule/defmacrop/
-    // defdelegate/defimpl never match.
+fn detect_elixir_public_def(trimmed: &str) -> Option<(String, MarkerKind)> {
+    // Exact keyword + space, so defp/defmacrop/defdelegate and friends never match.
+    if let Some(rest) = trimmed.strip_prefix("defmodule ") {
+        return dotted_alias(rest.trim_start()).map(|name| (name, MarkerKind::Module));
+    }
+    if let Some(rest) = trimmed.strip_prefix("defprotocol ") {
+        return dotted_alias(rest.trim_start()).map(|name| (name, MarkerKind::Contract));
+    }
+    if let Some(rest) = trimmed.strip_prefix("defimpl ") {
+        let rest = rest.trim_start();
+        let alias = dotted_alias(rest)?;
+        // `defimpl Foo, for: Bar` — keep the for-target in the pointer name.
+        let tail = &rest[alias.len()..];
+        let name = match tail.find("for:") {
+            Some(pos) => {
+                let target = dotted_alias(tail[pos + 4..].trim_start())?;
+                format!("{alias} for {target}")
+            }
+            None => alias,
+        };
+        return Some((name, MarkerKind::Contract));
+    }
+    if let Some(rest) = trimmed.strip_prefix("@callback ") {
+        let name = ident(rest.trim_start()).filter(|name| !name.is_empty())?;
+        return Some((name, MarkerKind::Contract));
+    }
     let rest = trimmed
         .strip_prefix("def ")
-        .or_else(|| trimmed.strip_prefix("defmacro "))?
+        .or_else(|| trimmed.strip_prefix("defmacro "))
+        .or_else(|| trimmed.strip_prefix("defguard "))?
         .trim_start();
     if rest.starts_with("unquote") {
         return None; // macro-generated head
@@ -595,7 +685,7 @@ fn detect_elixir_public_def(trimmed: &str) -> Option<String> {
             name.push(c);
         }
     }
-    Some(name)
+    Some((name, MarkerKind::Function))
 }
 
 fn detect_js_export(trimmed: &str) -> Option<String> {
@@ -837,6 +927,452 @@ fn sanitize_description(text: &str) -> String {
     clean.trim().to_string()
 }
 
+/// Shape of an existing `@doc`/`@moduledoc` attribute so annotate can merge
+/// the marker into it instead of stacking a second attribute.
+#[derive(Debug)]
+enum ElixirDocAttr {
+    /// No doc attribute found — a fresh one may be inserted.
+    Missing,
+    /// `@doc false`, keyword forms, or anything malformed: leave the line
+    /// untouched and hang the marker on a `#` comment above it instead.
+    Leave(usize),
+    /// `@doc "one line"` — index of the attribute line.
+    SingleLine(usize),
+    /// `@doc """` heredoc — (opener index, closing `"""` index).
+    Heredoc(usize, usize),
+}
+
+/// Locate the `@doc`-style attribute in the contiguous block above a def.
+fn find_elixir_doc_attr(lines: &[&str], decl_idx: usize, attr: &str) -> ElixirDocAttr {
+    let mut index = decl_idx;
+    let mut heredoc_close: Option<usize> = None;
+    while index > 0 {
+        index -= 1;
+        let trimmed = lines[index].trim();
+        if let Some(close) = heredoc_close {
+            if trimmed.starts_with('@') && trimmed.contains("\"\"\"") {
+                if trimmed.starts_with(attr) {
+                    return ElixirDocAttr::Heredoc(index, close);
+                }
+                heredoc_close = None; // some other attribute's heredoc; keep walking
+            }
+            continue;
+        }
+        if trimmed.is_empty() {
+            break;
+        }
+        if trimmed == "\"\"\"" {
+            heredoc_close = Some(index);
+            continue;
+        }
+        if !(trimmed.starts_with('#') || trimmed.starts_with('@')) {
+            break;
+        }
+        if let Some(rest) = trimmed.strip_prefix(attr) {
+            let rest = rest.trim();
+            if rest == "false" {
+                return ElixirDocAttr::Leave(index);
+            }
+            if rest.starts_with("\"\"\"") {
+                // A heredoc opener seen before its closer only happens in
+                // unbalanced source; safer to leave it alone than to rewrite.
+                return ElixirDocAttr::Leave(index);
+            }
+            if rest.starts_with('"') {
+                return ElixirDocAttr::SingleLine(index);
+            }
+            // keyword forms like `@doc since: "1.2"` carry no docstring; keep walking
+        }
+    }
+    ElixirDocAttr::Missing
+}
+
+/// Locate the `@moduledoc` in the attribute header block below `defmodule X do`.
+/// Returns the attribute shape plus the line index a fresh `@moduledoc` belongs at.
+fn find_elixir_moduledoc(lines: &[&str], decl_idx: usize) -> (ElixirDocAttr, usize) {
+    let mut index = decl_idx + 1;
+    while index < lines.len() {
+        let trimmed = lines[index].trim();
+        if let Some(rest) = trimmed.strip_prefix("@moduledoc") {
+            let rest = rest.trim();
+            if rest == "false" {
+                return (ElixirDocAttr::Leave(index), index);
+            }
+            if rest.starts_with("\"\"\"") {
+                return match lines[index + 1..]
+                    .iter()
+                    .position(|line| line.trim() == "\"\"\"")
+                {
+                    Some(offset) => (ElixirDocAttr::Heredoc(index, index + 1 + offset), index),
+                    None => (ElixirDocAttr::Leave(index), index),
+                };
+            }
+            if rest.starts_with('"') {
+                return (ElixirDocAttr::SingleLine(index), index);
+            }
+            // keyword form — keep scanning the header block
+        } else if trimmed == "\"\"\""
+            || (!trimmed.is_empty() && !trimmed.starts_with('#') && !trimmed.starts_with('@'))
+        {
+            break; // module body starts — no moduledoc in the header block
+        }
+        index += 1;
+    }
+    (ElixirDocAttr::Missing, decl_idx + 1)
+}
+
+/// defmodule targets carry their marker in the @moduledoc BELOW the head, so
+/// idempotency has to look down there, not just at the block above.
+fn module_doc_has_marker(lines: &[&str], decl_idx: usize) -> bool {
+    let mut index = decl_idx + 1;
+    let mut in_heredoc = false;
+    while index < lines.len() {
+        let line = lines[index];
+        let trimmed = line.trim();
+        if in_heredoc {
+            if trimmed == "\"\"\"" {
+                in_heredoc = false;
+            } else if line.contains('〚') || line.contains('⟦') {
+                return true;
+            }
+            index += 1;
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("@moduledoc") {
+            if rest.trim().starts_with("\"\"\"") {
+                in_heredoc = true;
+            } else if line.contains('〚') || line.contains('⟦') {
+                return true;
+            }
+        } else if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('@') {
+            if line.contains('〚') || line.contains('⟦') {
+                return true;
+            }
+        } else {
+            break;
+        }
+        index += 1;
+    }
+    false
+}
+
+/// First sentence of an existing doc attribute's docstring, for reuse as the
+/// marker description when merging into it.
+fn elixir_doc_attr_summary(lines: &[&str], attr: &ElixirDocAttr) -> Option<String> {
+    match attr {
+        ElixirDocAttr::Heredoc(open, close) => lines[*open + 1..*close]
+            .iter()
+            .map(|line| line.trim())
+            .find(|line| {
+                !line.is_empty() && !line.starts_with('〚') && !line.starts_with('⟦')
+            })
+            .map(|line| sanitize_description(line)),
+        ElixirDocAttr::SingleLine(idx) => {
+            let trimmed = lines[*idx].trim();
+            let body = trimmed
+                .split_once(' ')
+                .map(|(_, rest)| rest.trim().trim_matches('"').to_string())
+                .unwrap_or_default();
+            (!body.is_empty()).then(|| sanitize_description(&body))
+        }
+        _ => None,
+    }
+}
+
+fn elixir_new_doc_block(
+    attr: &str,
+    indent: &str,
+    summary: Option<&str>,
+    how: Option<&str>,
+    marker_line: &str,
+) -> Vec<String> {
+    let mut block = vec![format!("{indent}{attr} \"\"\"\n")];
+    if let Some(summary) = summary.filter(|s| !s.is_empty()) {
+        block.push(format!("{indent}{summary}\n"));
+        if how.is_some() {
+            block.push(format!("{indent}\n"));
+        }
+    }
+    if let Some(how) = how.filter(|h| !h.is_empty()) {
+        block.push(format!("{indent}How: {how}\n"));
+    }
+    if block.len() > 1 {
+        block.push(format!("{indent}\n"));
+    }
+    block.push(format!("{indent}{marker_line}\n"));
+    block.push(format!("{indent}\"\"\"\n"));
+    block
+}
+
+/// Widen `@doc "text"` into a heredoc that preserves the existing text and
+/// appends the marker line.
+fn elixir_widen_single_line(line: &str, marker_line: &str) -> Vec<String> {
+    let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+    let trimmed = line.trim();
+    let attr = trimmed.split_whitespace().next().unwrap_or("@doc");
+    let body = trimmed
+        .strip_prefix(attr)
+        .map(|rest| rest.trim().trim_matches('"').to_string())
+        .unwrap_or_default();
+    let mut block = vec![format!("{indent}{attr} \"\"\"\n")];
+    if !body.is_empty() {
+        block.push(format!("{indent}{body}\n"));
+    }
+    block.push(format!("{indent}\n"));
+    block.push(format!("{indent}{marker_line}\n"));
+    block.push(format!("{indent}\"\"\"\n"));
+    block
+}
+
+/// Lines inserted just before a heredoc's closing `"""`: a blank line and the
+/// marker, at the closer's indent so heredoc unindenting keeps both.
+fn elixir_heredoc_marker_lines(close_line: &str, marker_line: &str) -> Vec<String> {
+    let indent: String = close_line
+        .chars()
+        .take_while(|c| c.is_whitespace())
+        .collect();
+    vec![format!("{indent}\n"), format!("{indent}{marker_line}\n")]
+}
+
+fn indent_of(line: &str) -> String {
+    line.chars().take_while(|c| c.is_whitespace()).collect()
+}
+
+/// Derive a "How:" clause from the declaration signature: argument list
+/// (defaults stripped), Elixir `when` guards and `@spec`/`@callback` return
+/// type, Rust return type. `None` when nothing is derivable from the head.
+fn derive_how(lang: Lang, lines: &[&str], decl_idx: usize) -> Option<String> {
+    let head = lines[decl_idx].trim();
+    let mut parts: Vec<String> = Vec::new();
+    match lang {
+        Lang::Elixir => {
+            let args = elixir_head_args(head);
+            if !args.is_empty() {
+                parts.push(format_args_clause(&args));
+            }
+            if let Some(guard) = elixir_head_guard(head) {
+                parts.push(format!("guards `{guard}`"));
+            }
+            let ret = if head.starts_with("@callback ") {
+                head.split_once("::")
+                    .map(|(_, ret)| ret.trim().trim_end_matches(',').to_string())
+            } else {
+                elixir_spec_return(lines, decl_idx)
+            };
+            if let Some(ret) = ret.filter(|ret| !ret.is_empty()) {
+                parts.push(format!("returns `{ret}`"));
+            }
+        }
+        Lang::Rust => {
+            let (args, ret) = rust_head_parts(head)?;
+            if !args.is_empty() {
+                parts.push(format_args_clause(&args));
+            }
+            if let Some(ret) = ret.filter(|ret| !ret.is_empty()) {
+                parts.push(format!("returns `{ret}`"));
+            }
+        }
+        Lang::Js => {
+            let args = js_head_args(head);
+            if !args.is_empty() {
+                parts.push(format_args_clause(&args));
+            }
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("; "))
+    }
+}
+
+fn format_args_clause(args: &[String]) -> String {
+    let list = args
+        .iter()
+        .map(|arg| format!("`{arg}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("takes {list}")
+}
+
+/// `&source[..offset]` of the bracket matching the first unbalanced opener —
+/// i.e. the argument-list body for a head whose `(` we already consumed.
+fn matching_bracket(source: &str, close: char) -> Option<&str> {
+    let mut depth = 0usize;
+    for (offset, c) in source.char_indices() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' if depth == 0 => return (c == close).then(|| &source[..offset]),
+            ')' | ']' | '}' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
+}
+
+fn split_top_level_commas(body: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut current = String::new();
+    for c in body.chars() {
+        match c {
+            '(' | '[' | '{' => {
+                depth += 1;
+                current.push(c);
+            }
+            ')' | ']' | '}' => {
+                depth = depth.saturating_sub(1);
+                current.push(c);
+            }
+            ',' if depth == 0 => {
+                parts.push(current.clone());
+                current.clear();
+            }
+            _ => current.push(c),
+        }
+    }
+    parts.push(current);
+    parts
+}
+
+/// Top-level argument list of an Elixir head, defaults (`\\ value`) stripped.
+/// Multi-line heads degrade to an empty list rather than guessing.
+fn elixir_head_args(head: &str) -> Vec<String> {
+    let Some(open) = head.find('(') else {
+        return Vec::new();
+    };
+    let Some(body) = matching_bracket(&head[open + 1..], ')') else {
+        return Vec::new();
+    };
+    if body.trim().is_empty() {
+        return Vec::new();
+    }
+    split_top_level_commas(body)
+        .into_iter()
+        .map(|arg| arg.split("\\\\").next().unwrap_or(&arg).trim().to_string())
+        .filter(|arg| !arg.is_empty())
+        .collect()
+}
+
+fn elixir_head_guard(head: &str) -> Option<String> {
+    let (_, rest) = head.split_once(" when ")?;
+    let mut guard = rest;
+    if let Some(pos) = guard.find(", do:") {
+        guard = &guard[..pos];
+    }
+    let guard = guard.trim_end().trim_end_matches(" do").trim();
+    (!guard.is_empty()).then(|| guard.to_string())
+}
+
+fn elixir_spec_return(lines: &[&str], decl_idx: usize) -> Option<String> {
+    let mut index = decl_idx;
+    while index > 0 {
+        index -= 1;
+        let trimmed = lines[index].trim();
+        if trimmed.is_empty() {
+            break;
+        }
+        if let Some(spec) = trimmed.strip_prefix("@spec ") {
+            return spec
+                .split_once("::")
+                .map(|(_, ret)| ret.trim().trim_end_matches(',').to_string());
+        }
+        if trimmed.starts_with('#') || trimmed.starts_with('@') {
+            continue;
+        }
+        break;
+    }
+    None
+}
+
+/// `(args, return)` from a single-line Rust head; `self` receivers are dropped.
+fn rust_head_parts(head: &str) -> Option<(Vec<String>, Option<String>)> {
+    let open = head.find('(')?;
+    let body = matching_bracket(&head[open + 1..], ')')?;
+    let args = if body.trim().is_empty() {
+        Vec::new()
+    } else {
+        split_top_level_commas(body)
+            .into_iter()
+            .map(|arg| arg.trim().to_string())
+            .filter(|arg| {
+                !arg.is_empty()
+                    && arg != "self"
+                    && arg != "&self"
+                    && arg != "&mut self"
+            })
+            .collect()
+    };
+    let after = head[open + 2 + body.len()..].trim_start(); // skip the closing ')'
+    let ret = after.strip_prefix("->").map(|rest| {
+        let ret = rest.split('{').next().unwrap_or(rest);
+        let ret = ret.split(" where").next().unwrap_or(ret);
+        ret.trim().to_string()
+    });
+    let ret = match ret {
+        Some(ret) if !ret.is_empty() => Some(ret),
+        _ => None,
+    };
+    Some((args, ret))
+}
+
+fn js_head_args(head: &str) -> Vec<String> {
+    let Some(open) = head.find('(') else {
+        return Vec::new();
+    };
+    let Some(body) = matching_bracket(&head[open + 1..], ')') else {
+        return Vec::new();
+    };
+    if body.trim().is_empty() {
+        return Vec::new();
+    }
+    split_top_level_commas(body)
+        .into_iter()
+        .map(|arg| arg.split('=').next().unwrap_or(&arg).trim().to_string())
+        .map(|arg| arg.split(':').next().unwrap_or(&arg).trim().to_string())
+        .filter(|arg| !arg.is_empty())
+        .collect()
+}
+
+/// Honest description fallback when nothing is derivable from docs: the shape
+/// of the declaration itself (name/arity for Elixir, signature elsewhere).
+fn fallback_description(lang: Lang, name: &str, head: &str, kind: MarkerKind) -> String {
+    if kind == MarkerKind::Module {
+        return format!("{name} module");
+    }
+    let head = head.trim_start();
+    match lang {
+        Lang::Elixir => {
+            if head.starts_with("defprotocol ") {
+                format!("{name} protocol")
+            } else if head.starts_with("defimpl ") {
+                format!("{name} implementation")
+            } else {
+                let args = elixir_head_args(head);
+                if !args.is_empty() {
+                    format!("{name}/{}", args.len())
+                } else if head.contains('(') {
+                    format!("{name}/0")
+                } else {
+                    name.to_string()
+                }
+            }
+        }
+        Lang::Rust => match rust_head_parts(head) {
+            Some((args, Some(ret))) if !args.is_empty() => {
+                format!("{name}({}) -> {ret}", args.join(", "))
+            }
+            Some((args, None)) if !args.is_empty() => format!("{name}({})", args.join(", ")),
+            Some((_, Some(ret))) => format!("{name}() -> {ret}"),
+            _ => name.to_string(),
+        },
+        Lang::Js => match js_head_args(head) {
+            args if !args.is_empty() => format!("{name}({})", args.join(", ")),
+            _ => format!("{name}()"),
+        },
+    }
+}
+
 fn annotate_command(args: &[String]) -> Result<(), String> {
     let options = parse_annotate_options(args)?;
     let root = absolute_path(&options.root)?;
@@ -844,7 +1380,8 @@ fn annotate_command(args: &[String]) -> Result<(), String> {
 
     // Live collision map: DB entries plus every marker in the scanned tree (sources are
     // scanned too now, so stray markers not yet indexed are collision-checked as well).
-    let (mut pointers, errors) = collect_pointers(&root, &db_path, &options.filter)?;
+    let mut token_index = store_token_index(&root, &db_path)?;
+    let (mut pointers, errors) = collect_pointers(&root, &db_path, &options.filter, &token_index)?;
     for pointer in backend_status(&root)? {
         pointers.entry(pointer.code.clone()).or_insert(pointer);
     }
@@ -869,14 +1406,14 @@ fn annotate_command(args: &[String]) -> Result<(), String> {
         };
         let relpath = rel_path(&path, &root);
         let lines: Vec<&str> = text.lines().collect();
-        let mut targets: Vec<(usize, String)> = Vec::new();
+        let mut targets: Vec<(usize, String, MarkerKind)> = Vec::new();
         let mut seen_names: HashSet<String> = HashSet::new();
         for (idx, line) in lines.iter().enumerate() {
             if line.len() > 500 {
                 continue; // minification tripwire
             }
             let trimmed = line.trim_start();
-            let Some(name) = detect_public_decl(lang, trimmed) else {
+            let Some((name, kind)) = detect_public_decl(lang, trimmed) else {
                 if lang == Lang::Js && trimmed.starts_with("module.exports = {") {
                     review_flags.push(format!(
                         "{relpath}:{}: object-literal module.exports — annotate members manually",
@@ -891,7 +1428,10 @@ fn annotate_command(args: &[String]) -> Result<(), String> {
             if block_above_has_marker(lang, &lines, idx) {
                 continue;
             }
-            targets.push((idx, name));
+            if kind == MarkerKind::Module && module_doc_has_marker(&lines, idx) {
+                continue;
+            }
+            targets.push((idx, name, kind));
         }
         if targets.is_empty() {
             continue;
@@ -902,46 +1442,142 @@ fn annotate_command(args: &[String]) -> Result<(), String> {
             ));
         }
 
-        let mut insertions: Vec<(usize, String)> = Vec::new();
-        for (idx, name) in &targets {
+        // (line index, remove count, replacement lines, sequence) — applied
+        // bottom-up so earlier indices never shift under later edits.
+        let mut edits: Vec<(usize, usize, Vec<String>, usize)> = Vec::new();
+        for (seq, (idx, name, kind)) in targets.iter().enumerate() {
+            let idx = *idx;
+            let head = lines[idx];
+            let indent = indent_of(head);
             let seed = format!("{relpath}::{name}");
             let (code, uuid, _uuid_name, _attempt) =
                 generate_uuid5_code(&seed, DOC_POINTER_NAMESPACE, "", &pointers)?;
             minted.insert(code.clone(), uuid);
-            let description = derive_description(lang, &lines, *idx)
-                .unwrap_or_else(|| format!("auto-generated pointer for public function {name}"));
-            let indent: String = lines[*idx]
-                .chars()
-                .take_while(|c| c.is_whitespace())
-                .collect();
-            let leader = comment_leader(lang);
-            insertions.push((
-                *idx,
-                format!("{indent}{leader} 〚🔧:{uuid}〛 {name} :: {description}"),
-            ));
+            // Fresh markers are token-form; index them so the closing build's
+            // re-collect resolves them without a store round-trip.
+            token_index.insert(code.clone(), uuid);
+            let how = derive_how(lang, &lines, idx);
+
+            let (doc_attr, summary) = if lang == Lang::Elixir && *kind == MarkerKind::Module {
+                let (attr, _) = find_elixir_moduledoc(&lines, idx);
+                let summary = elixir_doc_attr_summary(&lines, &attr);
+                (Some(attr), summary)
+            } else {
+                (None, derive_description(lang, &lines, idx))
+            };
+            let desc = match summary {
+                Some(ref summary) if !summary.is_empty() => summary.clone(),
+                _ => sanitize_description(&fallback_description(lang, name, head, *kind)),
+            };
+            let marker_line = format!("〚{}:{code}〛 {name} :: {desc}", kind.emoji());
+
+            if lang == Lang::Elixir {
+                let attr_name = if *kind == MarkerKind::Module {
+                    "@moduledoc"
+                } else {
+                    "@doc"
+                };
+                // @doc above defprotocol/defimpl/@callback heads warns or
+                // breaks compilation — contracts keep comment markers.
+                let effective = if *kind == MarkerKind::Contract {
+                    ElixirDocAttr::Missing
+                } else if *kind == MarkerKind::Module {
+                    doc_attr.unwrap_or(ElixirDocAttr::Missing)
+                } else {
+                    find_elixir_doc_attr(&lines, idx, "@doc")
+                };
+                match effective {
+                    _ if *kind == MarkerKind::Contract => {
+                        edits.push((idx, 0, vec![format!("{indent}# {marker_line}\n")], seq));
+                    }
+                    ElixirDocAttr::Missing if *kind == MarkerKind::Module => {
+                        let inner_indent = format!("{indent}  ");
+                        edits.push((
+                            idx + 1,
+                            0,
+                            elixir_new_doc_block(
+                                attr_name,
+                                &inner_indent,
+                                summary.as_deref(),
+                                how.as_deref(),
+                                &marker_line,
+                            ),
+                            seq,
+                        ));
+                    }
+                    ElixirDocAttr::Missing => {
+                        edits.push((
+                            idx,
+                            0,
+                            elixir_new_doc_block(
+                                attr_name,
+                                &indent,
+                                summary.as_deref(),
+                                how.as_deref(),
+                                &marker_line,
+                            ),
+                            seq,
+                        ));
+                    }
+                    ElixirDocAttr::Leave(attr_idx) => {
+                        // `@doc false` and malformed attributes: never change
+                        // doc visibility — hang the marker on a comment above.
+                        let attr_indent = indent_of(lines[attr_idx]);
+                        edits.push((
+                            attr_idx,
+                            0,
+                            vec![format!("{attr_indent}# {marker_line}\n")],
+                            seq,
+                        ));
+                    }
+                    ElixirDocAttr::SingleLine(attr_idx) => {
+                        edits.push((
+                            attr_idx,
+                            1,
+                            elixir_widen_single_line(lines[attr_idx], &marker_line),
+                            seq,
+                        ));
+                    }
+                    ElixirDocAttr::Heredoc(_open, close) => {
+                        // Existing docstring: append blank + marker before the
+                        // closing `"""` — never stack a second attribute.
+                        edits.push((
+                            close,
+                            0,
+                            elixir_heredoc_marker_lines(lines[close], &marker_line),
+                            seq,
+                        ));
+                    }
+                }
+            } else {
+                let leader = comment_leader(lang);
+                edits.push((idx, 0, vec![format!("{indent}{leader} {marker_line}\n")], seq));
+            }
             pointers.insert(
                 code.clone(),
                 Pointer {
                     uuid: Some(uuid),
-                    kind: Some(MarkerKind::Function),
+                    kind: Some(*kind),
                     code,
                     path: relpath.clone(),
                     line: idx + 1, // provisional; the closing build records exact lines
                     name: name.clone(),
-                    description,
+                    description: desc,
                     locations: vec![],
                 },
             );
         }
 
-        planned += insertions.len();
-        file_reports.push(format!("{relpath}: {} pointer(s)", insertions.len()));
+        planned += edits.len();
+        file_reports.push(format!("{relpath}: {} pointer(s)", edits.len()));
 
-        if options.write {
+        if options.write && !edits.is_empty() {
             let mut new_lines: Vec<String> =
                 text.split_inclusive('\n').map(str::to_string).collect();
-            for (idx, marker) in insertions.iter().rev() {
-                new_lines.insert(*idx, format!("{marker}\n"));
+            edits.sort_by(|a, b| (b.0, b.3).cmp(&(a.0, a.3)));
+            for (index, remove, replacement, _seq) in edits {
+                let end = (index + remove).min(new_lines.len());
+                new_lines.splice(index..end, replacement);
             }
             fs::write(&path, new_lines.concat())
                 .map_err(|error| format!("could not write {}: {error}", path.display()))?;
@@ -958,7 +1594,8 @@ fn annotate_command(args: &[String]) -> Result<(), String> {
     if options.write {
         // Closing build: re-collect (markers shifted lines) and persist DB + deeplinks
         // in the same invocation so `build --check` is green immediately after.
-        let (mut fresh, build_errors) = collect_pointers(&root, &db_path, &options.filter)?;
+        let (mut fresh, build_errors) =
+            collect_pointers(&root, &db_path, &options.filter, &token_index)?;
         for (code, uuid) in minted {
             if let Some(pointer) = fresh.get_mut(&code) {
                 pointer.uuid = Some(uuid);
@@ -1052,10 +1689,14 @@ fn parse_annotate_options(args: &[String]) -> Result<AnnotateOptions, String> {
 fn print_annotate_help() {
     println!(
         "usage: doc-pointers annotate [--root ROOT] [--db DB] [--include P]... [--exclude P]... [--lang exs] [--write]\n\n\
-Walk the tree and insert `〚🔧:UUID〛 Name :: Description` markers above every public/exported\n\
-Rust (`pub fn`), Elixir (`def`/`defmacro`), and JS/TS (`export`/`exports.`) function that\n\
-does not already have one in its doc/comment block. Dry-run by default; --write applies\n\
-the insertions and then reconciles .meta/pointers.yaml + expands deeplinks in the same run.\n\n\
+Walk the tree and insert `〚emoji:TOKEN〛 Name :: Description` markers (4-glyph token; full\n\
+UUIDs stay accepted on lookup) above every public/exported Rust (`pub fn`), Elixir\n\
+(`def`/`defmacro`/`defguard`), and JS/TS (`export`/`exports.`) function that does not\n\
+already have one in its doc/comment block. Rust and JS get `//` comment lines; Elixir\n\
+markers go into `@doc` docstrings (merged into existing ones, never stacked), modules\n\
+get `@moduledoc`, and contracts (`defprotocol`/`defimpl`/`@callback`) plus `@doc false`\n\
+declarations get `#` comments. Dry-run by default; --write applies the insertions and\n\
+then reconciles .meta/pointers.yaml + expands deeplinks in the same run.\n\n\
 options:\n  --root ROOT       repository root, default: current directory\n  --db DB           deprecated; only docs/doc-pointer-db.json is accepted for migration\n  --include P       only scan/annotate under this root-relative prefix (repeatable)\n  --exclude P       skip this root-relative prefix (repeatable)\n  --lang exs        also annotate .exs scripts (skipped by default)\n  --write           apply insertions (otherwise dry-run report only)"
     );
 }
@@ -1200,10 +1841,13 @@ fn print_help() {
         "\
 doc-pointers — durable UUID pointer markers
 
-A canonical marker has a type emoji and UUIDv5:
-  # 〚🔧:5c692577-ad0c-51f1-992c-759b5e5fffb5〛 run :: Runs the task
-  # 〚🧩:UUID〛 component :: reusable span
-  # 〚/🧩:UUID〛
+A canonical marker has a type emoji and the pointer's 4-glyph token:
+  # 〚🔧:𓳔𔐮𔘟𔄵〛 run :: Runs the task
+  # 〚🧩:𓳔𔐮𔘟𔄵〛 component :: reusable span
+  # 〚/🧩:𓳔𔐮𔘟𔄵〛
+Full UUIDv5 payloads (〚🔧:5c692577-ad0c-51f1-992c-759b5e5fffb5〛) remain
+accepted everywhere markers are parsed or looked up; new markers embed the
+token, derived from the UUID — tokens are never invented.
 
 Kinds: 📁 file, 📦 module/class/struct, 🔌 contract/interface/protocol,
        🧩 reusable component, 🔧 function, 🔀 logic, 📐 diagram.
@@ -1213,7 +1857,7 @@ declarations and deeplinks are read for migration, never generated.
 
 Commands:
   doc-pointers uuid5 [NAME]       mint UUID and typed marker (--kind KIND)
-  doc-pointers lookup UUID         show metadata and source snippets
+  doc-pointers lookup UUID|token  show metadata and source snippets
   doc-pointers build              scan without writing
   doc-pointers build --write      reconcile .meta/pointers.yaml and links
   doc-pointers build --check      fail if stores or links are stale
@@ -1221,7 +1865,7 @@ Commands:
   doc-pointers annotate --write   insert typed function markers, reconcile
   doc-pointers hook               install pre-commit build --check hook
 
-Canonical Markdown link: [label](deeplink:〚🔧:UUID〛)
+Canonical Markdown link: [label](deeplink:〚🔧:𓳔𔐮𔘟𔄵〛)
 Expanded target: path:line?pointer=UUID
 
 Use `COMMAND --help` for options. Bare --write/--check/--install-hook
@@ -1253,6 +1897,7 @@ fn collect_pointers(
     root: &Path,
     db_path: &Path,
     filter: &ScanFilter,
+    token_index: &HashMap<String, Uuid>,
 ) -> Result<(HashMap<String, Pointer>, Vec<String>), String> {
     let mut pointers: HashMap<String, Pointer> = HashMap::new();
     let mut errors = Vec::new();
@@ -1271,8 +1916,26 @@ fn collect_pointers(
             if in_fence {
                 continue;
             }
-            if let Some((kind, uuid, closing, marker_end)) = parse_canonical_marker(line) {
-                let code = unicode4_encode_uuid(uuid);
+            if let Some((kind, payload, closing, marker_end)) = parse_canonical_marker(line) {
+                // Token markers carry no UUID; resolve through the store index
+                // (backend YAML + legacy JSON + anything minted this run).
+                let uuid = match &payload {
+                    MarkerPayload::Uuid(uuid) => Some(*uuid),
+                    MarkerPayload::Token(code) => token_index.get(code).copied(),
+                };
+                let Some(uuid) = uuid else {
+                    errors.push(format!(
+                        "{file_path}:{}: token marker 〚{}:{}〛 has no store record",
+                        index + 1,
+                        kind.emoji(),
+                        payload.as_str()
+                    ));
+                    continue;
+                };
+                let code = match &payload {
+                    MarkerPayload::Uuid(uuid) => unicode4_encode_uuid(*uuid),
+                    MarkerPayload::Token(code) => code.clone(),
+                };
                 if closing {
                     if !kind.closable() {
                         errors.push(format!(
@@ -1391,7 +2054,7 @@ fn collect_pointers(
     Ok((pointers, errors))
 }
 
-fn parse_canonical_marker(line: &str) -> Option<(MarkerKind, Uuid, bool, usize)> {
+fn parse_canonical_marker(line: &str) -> Option<(MarkerKind, MarkerPayload, bool, usize)> {
     let start = line.find('〚')?;
     if !declaration_context_allows(line, start) {
         return None;
@@ -1403,19 +2066,25 @@ fn parse_canonical_marker(line: &str) -> Option<(MarkerKind, Uuid, bool, usize)>
         Some(body) => (true, body),
         None => (false, body),
     };
-    let (emoji, uuid_text) = body.split_once(':')?;
+    let (emoji, payload_text) = body.split_once(':')?;
     let kind = MarkerKind::parse(emoji)?;
     if kind.emoji() != emoji {
         return None;
     }
-    let uuid = Uuid::parse_str(uuid_text).ok()?;
-    if uuid.to_string() != uuid_text
-        || uuid.get_version_num() != 5
-        || uuid.get_variant() != uuid::Variant::RFC4122
-    {
+    let payload = if let Ok(uuid) = Uuid::parse_str(payload_text) {
+        if uuid.to_string() != payload_text
+            || uuid.get_version_num() != 5
+            || uuid.get_variant() != uuid::Variant::RFC4122
+        {
+            return None;
+        }
+        MarkerPayload::Uuid(uuid)
+    } else if valid_token_glyphs(payload_text) {
+        MarkerPayload::Token(payload_text.to_string())
+    } else {
         return None;
-    }
-    Some((kind, uuid, closing, body_end + '〛'.len_utf8()))
+    };
+    Some((kind, payload, closing, body_end + '〛'.len_utf8()))
 }
 
 fn parse_declaration(line: &str) -> Option<(String, String, String)> {
@@ -1694,10 +2363,13 @@ fn expand_line(
         let code = normalize_code(raw_code);
         if canonical.is_some() || (code.chars().count() == 4 && valid_code(&code)) {
             output.push_str(before);
-            let pointer = match canonical {
-                Some((kind, uuid, _, _)) => pointers
+            let pointer = match canonical.map(|(kind, payload, _, _)| (kind, payload)) {
+                Some((kind, MarkerPayload::Uuid(uuid))) => pointers
                     .values()
                     .find(|pointer| pointer.uuid == Some(uuid) && pointer.kind == Some(kind)),
+                Some((kind, MarkerPayload::Token(token))) => pointers
+                    .get(&token)
+                    .filter(|pointer| pointer.kind == Some(kind)),
                 None => pointers.get(&code),
             };
             if let Some(pointer) = pointer {
@@ -1978,6 +2650,23 @@ fn backend_status(root: &Path) -> Result<Vec<Pointer>, String> {
         .collect()
 }
 
+/// Token -> UUID resolution index from persisted stores (backend YAML + legacy
+/// JSON). Token-form markers embed no UUID; this map is how they resolve.
+fn store_token_index(root: &Path, db_path: &Path) -> Result<HashMap<String, Uuid>, String> {
+    let mut index = HashMap::new();
+    for pointer in legacy_records(db_path)?.into_values() {
+        if let Some(uuid) = pointer.uuid {
+            index.entry(pointer.code).or_insert(uuid);
+        }
+    }
+    for pointer in backend_status(root)? {
+        if let Some(uuid) = pointer.uuid {
+            index.insert(pointer.code, uuid);
+        }
+    }
+    Ok(index)
+}
+
 fn backend_reconcile(root: &Path, records: &[Value], write: bool) -> Result<bool, String> {
     let response = backend_request(
         root,
@@ -2172,12 +2861,13 @@ fn token_char_from_index(mut index: u32) -> char {
 fn format_pointer(
     format: PointerFormat,
     kind: MarkerKind,
-    uuid: Uuid,
     code: &str,
     name: Option<&str>,
     description: &str,
 ) -> Result<String, String> {
-    let marker = format!("〚{}:{uuid}〛", kind.emoji());
+    // Emitted markers embed the 4-glyph token; full-UUID payloads stay
+    // accepted on lookup, they are just no longer what we print.
+    let marker = format!("〚{}:{code}〛", kind.emoji());
     let payload = match format {
         PointerFormat::Marker => marker,
         PointerFormat::Code => code.to_string(),
@@ -2310,7 +3000,7 @@ mod tests {
             let line = format!("# 〚{emoji}:{uuid}〛 Name :: Description");
             let (kind, parsed, closing, _) = parse_canonical_marker(&line).unwrap();
             assert_eq!(kind.emoji(), emoji);
-            assert_eq!(parsed, uuid);
+            assert_eq!(parsed, MarkerPayload::Uuid(uuid));
             assert!(!closing);
         }
         assert!(
@@ -2322,9 +3012,77 @@ mod tests {
         assert!(parse_lookup_key(&v4.to_string()).is_err());
         assert_eq!(
             parse_lookup_key(&format!("〚🔧:{uuid}〛")).unwrap(),
-            (Some(MarkerKind::Function), uuid)
+            (Some(MarkerKind::Function), MarkerPayload::Uuid(uuid))
         );
-        assert_eq!(parse_lookup_key(&uuid.to_string()).unwrap(), (None, uuid));
+        assert_eq!(
+            parse_lookup_key(&uuid.to_string()).unwrap(),
+            (None, MarkerPayload::Uuid(uuid))
+        );
+    }
+
+    #[test]
+    fn token_markers_parse_and_require_store_resolution() {
+        // The canonical golden token — embeds are 4 glyphs, never the UUID.
+        let line = "# 〚🔧:𓳔𔐮𔘟𔄵〛 TestPointer :: description";
+        let (kind, parsed, closing, _end) = parse_canonical_marker(line).unwrap();
+        assert_eq!(kind, MarkerKind::Function);
+        assert_eq!(parsed, MarkerPayload::Token("𓳔𔐮𔘟𔄵".to_string()));
+        assert!(!closing);
+
+        let (_, closing_parsed, closing, _) =
+            parse_canonical_marker("<!-- 〚/🧩:𓳔𔐮𔘟𔄵〛 -->").unwrap();
+        assert_eq!(closing_parsed, MarkerPayload::Token("𓳔𔐮𔘟𔄵".to_string()));
+        assert!(closing);
+
+        // Exactly four glyphs from the hieroglyph ranges — not three, not ASCII.
+        assert!(parse_canonical_marker("# 〚🔧:𓳔𔐮𔘟〛 short :: x").is_none());
+        assert!(parse_canonical_marker("# 〚🔧:abCD〛 ascii :: x").is_none());
+        assert!(parse_canonical_marker("# 〚🔧:𓳔𔐮𔘟𔄵𓳔〛 extra :: x").is_none());
+        assert_eq!(
+            parse_lookup_key("〚🔧:𓳔𔐮𔘟𔄵〛").unwrap(),
+            (
+                Some(MarkerKind::Function),
+                MarkerPayload::Token("𓳔𔐮𔘟𔄵".to_string())
+            )
+        );
+
+        // Token markers carry no UUID: collect resolves them through the index.
+        let uuid = Uuid::new_v5(&DOC_POINTER_NAMESPACE, b"token-marker-resolution");
+        let token = unicode4_encode_uuid(uuid);
+        let root = env::temp_dir().join(format!("doc-pointers-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("a.ex"),
+            format!("# 〚🔧:{token}〛 run :: Runs the task\ndef run, do: :ok\n"),
+        )
+        .unwrap();
+        let mut index = HashMap::new();
+        index.insert(token.clone(), uuid);
+        let (pointers, errors) = collect_pointers(
+            &root,
+            &root.join(DEFAULT_DB_PATH),
+            &ScanFilter::default(),
+            &index,
+        )
+        .unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(pointers[&token].uuid, Some(uuid));
+
+        // An unknown token fails loudly instead of minting a phantom pointer.
+        fs::write(
+            root.join("b.ex"),
+            format!("# 〚🔧:{token}〛 fine\n# 〚🔧:𓀀𓀻𓃉𓏦〛 stranger :: unknown\ndef other, do: :ok\n"),
+        )
+        .unwrap();
+        let (_, errors) = collect_pointers(
+            &root,
+            &root.join(DEFAULT_DB_PATH),
+            &ScanFilter::default(),
+            &index,
+        )
+        .unwrap();
+        assert!(errors.iter().any(|error| error.contains("no store record")));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2344,8 +3102,13 @@ mod tests {
             )
             .unwrap();
         }
-        let (pointers, errors) =
-            collect_pointers(&root, &root.join(DEFAULT_DB_PATH), &ScanFilter::default()).unwrap();
+        let (pointers, errors) = collect_pointers(
+            &root,
+            &root.join(DEFAULT_DB_PATH),
+            &ScanFilter::default(),
+            &HashMap::new(),
+        )
+        .unwrap();
         assert!(errors.is_empty(), "{errors:?}");
         let pointer = &pointers[&unicode4_encode_uuid(uuid)];
         assert_eq!(pointer.kind, Some(MarkerKind::Component));
@@ -2370,8 +3133,13 @@ mod tests {
             format!("# 〚🧩:{a}〛 A :: first\nA and B\n# 〚🧩:{b}〛 B :: second\nA and B\n# 〚/🧩:{a}〛\nB only\n# 〚/🧩:{b}〛\n"),
         )
         .unwrap();
-        let (pointers, errors) =
-            collect_pointers(&root, &root.join(DEFAULT_DB_PATH), &ScanFilter::default()).unwrap();
+        let (pointers, errors) = collect_pointers(
+            &root,
+            &root.join(DEFAULT_DB_PATH),
+            &ScanFilter::default(),
+            &HashMap::new(),
+        )
+        .unwrap();
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(
             pointers[&unicode4_encode_uuid(a)].locations[0].end_line,
@@ -2402,8 +3170,13 @@ mod tests {
             format!("[anchor](deeplink:〚🔧:{uuid}〛)\n"),
         )
         .unwrap();
-        let (scanned, errors) =
-            collect_pointers(&root, &root.join(DEFAULT_DB_PATH), &ScanFilter::default()).unwrap();
+        let (scanned, errors) = collect_pointers(
+            &root,
+            &root.join(DEFAULT_DB_PATH),
+            &ScanFilter::default(),
+            &HashMap::new(),
+        )
+        .unwrap();
         assert!(errors.is_empty(), "{errors:?}");
         assert!(scanned.is_empty());
         let index = expansion_index(&root, &root.join(DEFAULT_DB_PATH), &scanned).unwrap();
@@ -2431,8 +3204,13 @@ mod tests {
             format!("# 〚📐:{uuid}〛 diagram :: graph\n# 〚/🔀:{uuid}〛\n"),
         )
         .unwrap();
-        let (_, errors) =
-            collect_pointers(&root, &root.join(DEFAULT_DB_PATH), &ScanFilter::default()).unwrap();
+        let (_, errors) = collect_pointers(
+            &root,
+            &root.join(DEFAULT_DB_PATH),
+            &ScanFilter::default(),
+            &HashMap::new(),
+        )
+        .unwrap();
         assert!(errors.iter().any(|error| error.contains("does not match")));
         assert!(errors.iter().any(|error| error.contains("unclosed")));
         fs::remove_dir_all(root).unwrap();
@@ -2525,6 +3303,7 @@ mod tests {
             &root,
             &root.join("docs/doc-pointer-db.json"),
             &ScanFilter::default(),
+            &HashMap::new(),
         )
         .unwrap();
         assert!(errors.is_empty());
@@ -2554,6 +3333,7 @@ mod tests {
             &root,
             &root.join("docs/doc-pointer-db.json"),
             &ScanFilter::default(),
+            &HashMap::new(),
         )
         .unwrap();
         assert!(errors.is_empty());
@@ -2574,15 +3354,15 @@ mod tests {
     fn detects_rust_public_functions_only() {
         assert_eq!(
             detect_public_decl(Lang::Rust, "pub fn alpha() {"),
-            Some("alpha".to_string())
+            Some(("alpha".to_string(), MarkerKind::Function))
         );
         assert_eq!(
             detect_public_decl(Lang::Rust, "pub async fn beta(x: u8) -> u8 {"),
-            Some("beta".to_string())
+            Some(("beta".to_string(), MarkerKind::Function))
         );
         assert_eq!(
             detect_public_decl(Lang::Rust, "pub unsafe extern \"C\" fn gamma() {"),
-            Some("gamma".to_string())
+            Some(("gamma".to_string(), MarkerKind::Function))
         );
         assert_eq!(
             detect_public_decl(Lang::Rust, "pub(crate) fn hidden() {"),
@@ -2600,19 +3380,47 @@ mod tests {
     fn detects_elixir_public_defs_only() {
         assert_eq!(
             detect_public_decl(Lang::Elixir, "def fetch(id) do"),
-            Some("fetch".to_string())
+            Some(("fetch".to_string(), MarkerKind::Function))
         );
         assert_eq!(
             detect_public_decl(Lang::Elixir, "def valid?(x), do: true"),
-            Some("valid?".to_string())
+            Some(("valid?".to_string(), MarkerKind::Function))
         );
         assert_eq!(
             detect_public_decl(Lang::Elixir, "defmacro is_ok(x) do"),
-            Some("is_ok".to_string())
+            Some(("is_ok".to_string(), MarkerKind::Function))
         );
-        assert_eq!(detect_public_decl(Lang::Elixir, "defp helper(x) do"), None);
-        assert_eq!(detect_public_decl(Lang::Elixir, "defmodule Foo do"), None);
-        assert_eq!(detect_public_decl(Lang::Elixir, "defmacrop m(x) do"), None);
+        assert_eq!(
+            detect_public_decl(Lang::Elixir, "defguard is_flag(x) when is_integer(x)"),
+            Some(("is_flag".to_string(), MarkerKind::Function))
+        );
+        assert_eq!(
+            detect_public_decl(Lang::Elixir, "defmodule MyApp.Auth do"),
+            Some(("MyApp.Auth".to_string(), MarkerKind::Module))
+        );
+        assert_eq!(
+            detect_public_decl(Lang::Elixir, "defprotocol Serializable do"),
+            Some(("Serializable".to_string(), MarkerKind::Contract))
+        );
+        assert_eq!(
+            detect_public_decl(Lang::Elixir, "defimpl JSON.Encoder, for: User do"),
+            Some((
+                "JSON.Encoder for User".to_string(),
+                MarkerKind::Contract
+            ))
+        );
+        assert_eq!(
+            detect_public_decl(Lang::Elixir, "@callback handle_event(arg) :: :ok"),
+            Some(("handle_event".to_string(), MarkerKind::Contract))
+        );
+        assert_eq!(
+            detect_public_decl(Lang::Elixir, "defp helper(x) do"),
+            None
+        );
+        assert_eq!(
+            detect_public_decl(Lang::Elixir, "defmacrop m(x) do"),
+            None
+        );
         assert_eq!(
             detect_public_decl(Lang::Elixir, "def unquote(name)(x) do"),
             None
@@ -2623,30 +3431,30 @@ mod tests {
     fn detects_js_exports_only() {
         assert_eq!(
             detect_public_decl(Lang::Js, "export function run() {"),
-            Some("run".to_string())
+            Some(("run".to_string(), MarkerKind::Function))
         );
         assert_eq!(
             detect_public_decl(Lang::Js, "export default async function boot() {"),
-            Some("boot".to_string())
+            Some(("boot".to_string(), MarkerKind::Function))
         );
         assert_eq!(
             detect_public_decl(Lang::Js, "export const handler = async (req) => {"),
-            Some("handler".to_string())
+            Some(("handler".to_string(), MarkerKind::Function))
         );
         assert_eq!(
             detect_public_decl(
                 Lang::Js,
                 "export const fn2: (x: number) => void = (x) => {}"
             ),
-            Some("fn2".to_string())
+            Some(("fn2".to_string(), MarkerKind::Function))
         );
         assert_eq!(
             detect_public_decl(Lang::Js, "exports.helper = function () {"),
-            Some("helper".to_string())
+            Some(("helper".to_string(), MarkerKind::Function))
         );
         assert_eq!(
             detect_public_decl(Lang::Js, "module.exports.util = () => {}"),
-            Some("util".to_string())
+            Some(("util".to_string(), MarkerKind::Function))
         );
         assert_eq!(
             detect_public_decl(Lang::Js, "export const LIMIT = 5;"),
@@ -2745,16 +3553,23 @@ mod tests {
         let rust = fs::read_to_string(root.join("src/lib.rs")).unwrap();
         assert!(rust.contains("// 〚🔧:"));
         assert!(rust.contains(" add :: Adds numbers."));
-        assert!(rust.contains(" new :: auto-generated pointer for public function new"));
+        // Fallback description is the signature itself, not boilerplate.
+        assert!(rust.contains(" new :: new() -> Self"));
         // Inserted method marker keeps the declaration's indentation.
         assert!(rust.contains("\n    // 〚🔧:"));
 
         let elixir = fs::read_to_string(root.join("src/app.ex")).unwrap();
         assert_eq!(
-            elixir.matches("# 〚🔧:").count(),
+            elixir.matches("〚🔧:").count(),
             1,
             "one marker per function name across clauses/arities"
         );
+        // Module marker lands in a fresh @moduledoc; function marker in @doc.
+        assert!(elixir.contains("@moduledoc \"\"\""));
+        assert!(elixir.matches("〚📦:").count() == 1);
+        assert!(elixir.contains("@doc \"\"\""));
+        assert!(elixir.contains("How: takes `x`"));
+        assert!(elixir.contains("run :: run/1"));
         assert!(!elixir.contains("hidden ::"));
 
         let js = fs::read_to_string(root.join("src/index.js")).unwrap();
@@ -2772,6 +3587,80 @@ mod tests {
         assert_eq!(elixir, fs::read_to_string(root.join("src/app.ex")).unwrap());
         assert_eq!(js, fs::read_to_string(root.join("src/index.js")).unwrap());
 
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn annotate_merges_elixir_markers_into_doc_attributes() {
+        let root = env::temp_dir().join(format!("doc-pointers-test-{}", Uuid::new_v4()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("lib")).unwrap();
+        let source = concat!(
+            "defmodule Cart do\n",
+            "  @moduledoc \"\"\"\n",
+            "  Shopping cart.\n",
+            "\n",
+            "  Long description.\n",
+            "  \"\"\"\n",
+            "\n",
+            "  @doc \"Adds an item.\"\n",
+            "  @spec add(Cart.t(), item()) :: Cart.t()\n",
+            "  def add(cart, item) do\n",
+            "    cart\n",
+            "  end\n",
+            "\n",
+            "  @doc \"\"\"\n",
+            "  Removes an item.\n",
+            "  \"\"\"\n",
+            "  def remove(cart) do\n",
+            "    cart\n",
+            "  end\n",
+            "\n",
+            "  @doc false\n",
+            "  def debug(cart), do: cart\n",
+            "\n",
+            "  defprotocol Encoder do\n",
+            "    @callback encode(term) :: binary\n",
+            "  end\n",
+            "end\n",
+        );
+        fs::write(root.join("lib/cart.ex"), source).unwrap();
+        let args: Vec<String> = vec![
+            "--root".into(),
+            root.to_string_lossy().into_owned(),
+            "--write".into(),
+        ];
+        annotate_command(&args).unwrap();
+        let text = fs::read_to_string(root.join("lib/cart.ex")).unwrap();
+
+        // moduledoc heredoc: marker appended inside the existing docstring,
+        // never a second attribute.
+        assert_eq!(text.matches("@moduledoc").count(), 1);
+        assert!(text.contains("Long description.\n  \n  〚📦:"));
+        assert!(text.contains("Cart :: Shopping cart."));
+
+        // single-line @doc widened to a heredoc preserving the text.
+        assert!(text.contains("@doc \"\"\"\n  Adds an item.\n  \n  〚🔧:"));
+        assert!(text.contains("add :: Adds an item."));
+        assert_eq!(text.matches("@doc \"\"\"").count(), 2); // widened add + remove heredoc
+
+        // heredoc @doc: marker appended before the closing quotes.
+        assert!(text.contains("Removes an item.\n  \n  〚🔧:"));
+        assert!(text.contains("remove :: Removes an item."));
+
+        // @doc false stays untouched; marker hangs on a comment above.
+        assert!(text.contains("@doc false"));
+        assert!(text.contains("# 〚🔧:"));
+        assert!(text.contains("debug :: debug/1"));
+
+        // contracts get comment markers (an @doc above defprotocol warns).
+        assert!(text.contains("# 〚🔌:"));
+        assert!(text.contains("Encoder :: Encoder protocol"));
+        assert!(text.contains("encode/1"));
+
+        // Idempotency: second run changes nothing.
+        annotate_command(&args).unwrap();
+        assert_eq!(text, fs::read_to_string(root.join("lib/cart.ex")).unwrap());
         let _ = fs::remove_dir_all(&root);
     }
 

@@ -44,6 +44,20 @@ defmodule DocPointers.MCP.Tools.LookupTest do
     assert {:ok, %{count: 0}} = Lookup.call(%{uuid: "🔀:#{@uuid}"}, nil)
   end
 
+  test "token-form markers resolve through the store token index" do
+    token = DocPointers.Marker.token_from_uuid(@uuid)
+
+    assert {:ok, %{count: 1, results: [record]}} =
+             Lookup.call(%{marker: "〚🧩:#{token}〛"}, nil)
+
+    assert record["uuid"] == @uuid
+    # reported marker embeds the token, not the UUID
+    assert record["marker"] == "〚🧩:#{token}〛"
+
+    assert {:ok, %{count: 1}} = Lookup.call(%{uuid: "🧩:#{token}"}, nil)
+    assert {:ok, %{count: 1}} = Lookup.call(%{token: token}, nil)
+  end
+
   test "missing source is reported without failing lookup", %{root: root} do
     File.rm!(Path.join(root, "lib/b.ex"))
     assert {:ok, %{results: [record]}} = Lookup.call(%{uuid: @uuid}, nil)

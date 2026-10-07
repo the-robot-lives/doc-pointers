@@ -2,8 +2,9 @@ defmodule DocPointers.MCP.Tools.Generate do
   use Noizu.MCP.Server.Tool,
     name: "doc-pointer/generate",
     description: """
-    Generate a typed UUID marker for a source location and write its metadata
-    to .meta/pointers.yaml. The 4-glyph token remains a legacy lookup alias.
+    Generate a typed pointer marker for a source location and write its metadata
+    to .meta/pointers.yaml. Markers embed the pointer's 4-glyph token; the
+    full UUID is returned alongside and remains accepted in lookups.
     """,
     annotations: [destructive_hint: true]
 
