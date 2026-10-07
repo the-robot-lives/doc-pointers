@@ -328,7 +328,8 @@ fn scan_command(args: &[String]) -> Result<(), String> {
     let db_path = legacy_db_path(&root, &options.db)?;
 
     let token_index = store_token_index(&root, &db_path)?;
-    let (mut pointers, mut errors) = collect_pointers(&root, &db_path, &options.filter, &token_index)?;
+    let (mut pointers, mut errors) =
+        collect_pointers(&root, &db_path, &options.filter, &token_index)?;
     if !errors.is_empty() {
         return Err(errors.join("\n"));
     }
@@ -1125,9 +1126,7 @@ fn elixir_doc_attr_summary(lines: &[&str], attr: &ElixirDocAttr) -> Option<Strin
         ElixirDocAttr::Heredoc(open, close) => lines[*open + 1..*close]
             .iter()
             .map(|line| line.trim())
-            .find(|line| {
-                !line.is_empty() && !line.starts_with('〚') && !line.starts_with('⟦')
-            })
+            .find(|line| !line.is_empty() && !line.starts_with('〚') && !line.starts_with('⟦'))
             .map(|line| sanitize_description(line)),
         ElixirDocAttr::SingleLine(idx) => {
             let trimmed = lines[*idx].trim();
@@ -1204,11 +1203,20 @@ fn indent_of(line: &str) -> String {
 /// (defaults stripped), Elixir `when` guards and `@spec`/`@callback` return
 /// type, Rust return type. `None` when nothing is derivable from the head.
 fn derive_how(lang: Lang, lines: &[&str], decl_idx: usize) -> Option<String> {
-    let head = lines[decl_idx].trim();
+    let mut head = lines[decl_idx].trim();
     let mut parts: Vec<String> = Vec::new();
     match lang {
         Lang::Elixir => {
-            let args = elixir_head_args(head);
+            let mut args = elixir_head_args(head);
+            // Multi-clause heads often lead with an error pass-through clause
+            // (`def id({:error, _} = e), do: e`); describing only it misleads.
+            // Prefer the first substantive clause of the same function.
+            if !head.starts_with("@callback ") && elixir_error_passthrough(&args) {
+                if let Some(primary) = elixir_primary_clause_head(lines, decl_idx) {
+                    head = primary;
+                    args = elixir_head_args(head);
+                }
+            }
             if !args.is_empty() {
                 parts.push(format_args_clause(&args));
             }
@@ -1326,6 +1334,42 @@ fn elixir_head_guard(head: &str) -> Option<String> {
     (!guard.is_empty()).then(|| guard.to_string())
 }
 
+/// A clause whose FIRST arg matches `{:error, _} = e` (or bare `{:error, _}`),
+/// any arity — the conventional error pass-through head of a multi-clause
+/// function (`def id({:error, _} = e), do: e`, `def entity({:error, _} = e, _)`).
+fn elixir_error_passthrough(args: &[String]) -> bool {
+    args.first()
+        .is_some_and(|first| first.trim_start().starts_with("{:error,"))
+}
+
+/// First substantive (non-error-pass-through) clause head of the function
+/// declared at `decl_idx`, scanning sibling `def`/`defmacro`/`defguard` heads
+/// with the same name. Best-effort: stops at the first clause of a different
+/// function or at a scope boundary, and gives up after a small window.
+fn elixir_primary_clause_head<'a>(lines: &'a [&'a str], decl_idx: usize) -> Option<&'a str> {
+    let (decl_name, _) = detect_elixir_public_def(lines[decl_idx].trim())?;
+    for line in lines.iter().skip(decl_idx + 1).take(12) {
+        let trimmed = line.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with('#')
+            || trimmed.starts_with('@')
+            || trimmed == "end"
+        {
+            continue;
+        }
+        let Some((name, _)) = detect_elixir_public_def(trimmed) else {
+            continue; // body line of the current clause (e.g. `do: e`)
+        };
+        if name != decl_name {
+            return None; // reached the next function
+        }
+        if !elixir_error_passthrough(&elixir_head_args(trimmed)) {
+            return Some(trimmed);
+        }
+    }
+    None
+}
+
 fn elixir_spec_return(lines: &[&str], decl_idx: usize) -> Option<String> {
     let mut index = decl_idx;
     while index > 0 {
@@ -1357,12 +1401,7 @@ fn rust_head_parts(head: &str) -> Option<(Vec<String>, Option<String>)> {
         split_top_level_commas(body)
             .into_iter()
             .map(|arg| arg.trim().to_string())
-            .filter(|arg| {
-                !arg.is_empty()
-                    && arg != "self"
-                    && arg != "&self"
-                    && arg != "&mut self"
-            })
+            .filter(|arg| !arg.is_empty() && arg != "self" && arg != "&self" && arg != "&mut self")
             .collect()
     };
     let after = head[open + 2 + body.len()..].trim_start(); // skip the closing ')'
@@ -1613,7 +1652,12 @@ fn annotate_command(args: &[String]) -> Result<(), String> {
                 }
             } else {
                 let leader = comment_leader(lang);
-                edits.push((idx, 0, vec![format!("{indent}{leader} {marker_line}\n")], seq));
+                edits.push((
+                    idx,
+                    0,
+                    vec![format!("{indent}{leader} {marker_line}\n")],
+                    seq,
+                ));
             }
             pointers.insert(
                 code.clone(),
@@ -3135,7 +3179,9 @@ mod tests {
         // An unknown token fails loudly instead of minting a phantom pointer.
         fs::write(
             root.join("b.ex"),
-            format!("# 〚🔧:{token}〛 fine\n# 〚🔧:𓀀𓀻𓃉𓏦〛 stranger :: unknown\ndef other, do: :ok\n"),
+            format!(
+                "# 〚🔧:{token}〛 fine\n# 〚🔧:𓀀𓀻𓃉𓏦〛 stranger :: unknown\ndef other, do: :ok\n"
+            ),
         )
         .unwrap();
         let (_, errors) = collect_pointers(
@@ -3511,23 +3557,14 @@ mod tests {
         );
         assert_eq!(
             detect_public_decl(Lang::Elixir, "defimpl JSON.Encoder, for: User do"),
-            Some((
-                "JSON.Encoder for User".to_string(),
-                MarkerKind::Contract
-            ))
+            Some(("JSON.Encoder for User".to_string(), MarkerKind::Contract))
         );
         assert_eq!(
             detect_public_decl(Lang::Elixir, "@callback handle_event(arg) :: :ok"),
             Some(("handle_event".to_string(), MarkerKind::Contract))
         );
-        assert_eq!(
-            detect_public_decl(Lang::Elixir, "defp helper(x) do"),
-            None
-        );
-        assert_eq!(
-            detect_public_decl(Lang::Elixir, "defmacrop m(x) do"),
-            None
-        );
+        assert_eq!(detect_public_decl(Lang::Elixir, "defp helper(x) do"), None);
+        assert_eq!(detect_public_decl(Lang::Elixir, "defmacrop m(x) do"), None);
         assert_eq!(
             detect_public_decl(Lang::Elixir, "def unquote(name)(x) do"),
             None
@@ -3627,6 +3664,50 @@ mod tests {
         );
         let lines: Vec<&str> = vec!["pub fn undocumented() {}"];
         assert_eq!(derive_description(Lang::Rust, &lines, 0), None);
+    }
+
+    #[test]
+    fn derive_how_prefers_primary_clause_over_error_passthrough() {
+        // Multi-clause function leading with an error pass-through clause: the
+        // How text must describe the substantive clause, not `{:error, _} = e`.
+        let lines: Vec<&str> = vec![
+            "@spec id(any) :: {:ok, any} | {:error, any}",
+            "def id({:error, _} = e), do: e",
+            "",
+            "def id(R.ref(module: h) = subject) do",
+            "  h.id(subject)",
+            "end",
+        ];
+        let how = derive_how(Lang::Elixir, &lines, 1).unwrap();
+        assert!(how.contains("R.ref(module: h)"), "how was: {how}");
+        assert!(!how.contains("takes `{:error,"), "how was: {how}");
+        // Spec return is still picked up from above the first clause.
+        assert!(
+            how.contains("returns `{:ok, any} | {:error, any}`"),
+            "how was: {how}"
+        );
+
+        // Two-arg pass-through (entity/2 shape) also picks the primary clause.
+        let lines: Vec<&str> = vec![
+            "def entity({:error, _} = e, _), do: e",
+            "",
+            "def entity(R.ref(module: h) = subject, context) do",
+            "  h.entity(subject, context)",
+            "end",
+        ];
+        let how = derive_how(Lang::Elixir, &lines, 0).unwrap();
+        assert!(how.contains("R.ref(module: h)"), "how was: {how}");
+        assert!(!how.contains("takes `{:error,"), "how was: {how}");
+
+        // All-clauses-error shape: keeps describing the first head.
+        let lines: Vec<&str> = vec!["def id({:error, _} = e), do: e"];
+        let how = derive_how(Lang::Elixir, &lines, 0).unwrap();
+        assert!(how.contains("{:error,"), "how was: {how}");
+
+        // Different-function boundary stops the scan.
+        let lines: Vec<&str> = vec!["def id({:error, _} = e), do: e", "", "def other(x), do: x"];
+        let how = derive_how(Lang::Elixir, &lines, 0).unwrap();
+        assert!(how.contains("{:error,"), "how was: {how}");
     }
 
     #[test]
