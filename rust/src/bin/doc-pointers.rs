@@ -1334,10 +1334,12 @@ fn elixir_head_guard(head: &str) -> Option<String> {
     (!guard.is_empty()).then(|| guard.to_string())
 }
 
-/// A single-arg clause matching `{:error, _} = e` (or bare `{:error, _}`) —
-/// the conventional error pass-through head of a multi-clause function.
+/// A clause whose FIRST arg matches `{:error, _} = e` (or bare `{:error, _}`),
+/// any arity — the conventional error pass-through head of a multi-clause
+/// function (`def id({:error, _} = e), do: e`, `def entity({:error, _} = e, _)`).
 fn elixir_error_passthrough(args: &[String]) -> bool {
-    args.len() == 1 && args[0].trim_start().starts_with("{:error,")
+    args.first()
+        .is_some_and(|first| first.trim_start().starts_with("{:error,"))
 }
 
 /// First substantive (non-error-pass-through) clause head of the function
@@ -3684,6 +3686,18 @@ mod tests {
             how.contains("returns `{:ok, any} | {:error, any}`"),
             "how was: {how}"
         );
+
+        // Two-arg pass-through (entity/2 shape) also picks the primary clause.
+        let lines: Vec<&str> = vec![
+            "def entity({:error, _} = e, _), do: e",
+            "",
+            "def entity(R.ref(module: h) = subject, context) do",
+            "  h.entity(subject, context)",
+            "end",
+        ];
+        let how = derive_how(Lang::Elixir, &lines, 0).unwrap();
+        assert!(how.contains("R.ref(module: h)"), "how was: {how}");
+        assert!(!how.contains("takes `{:error,"), "how was: {how}");
 
         // All-clauses-error shape: keeps describing the first head.
         let lines: Vec<&str> = vec!["def id({:error, _} = e), do: e"];
