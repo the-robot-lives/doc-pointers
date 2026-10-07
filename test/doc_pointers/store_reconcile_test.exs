@@ -75,6 +75,29 @@ defmodule DocPointers.StoreReconcileTest do
     assert persisted["pointers"]["external-uuid"] == external
   end
 
+  test "component identity has multiple spans across files and survives reload", %{root: root} do
+    uuid = "550e8400-e29b-51d4-a716-446655440000"
+
+    locations = [
+      %{"file_path" => "lib/a.ex", "line" => 3, "end_line" => 8},
+      %{"file_path" => "lib/b.ex", "line" => 12, "end_line" => 14}
+    ]
+
+    component =
+      record("𓳔𔐮𔘟𔄵", "lib/a.ex", "authentication")
+      |> Map.merge(%{"uuid" => uuid, "kind" => "🧩", "locations" => locations})
+
+    assert {:ok, %{inserted: 1}} = Store.reconcile([component], true)
+    assert [stored] = Store.snapshot().records
+    assert stored["uuid"] == uuid
+    assert stored["locations"] == locations
+    assert File.exists?(Path.join([root, ".meta", "pointers.yaml"]))
+
+    Store.set_root(root)
+    assert Store.snapshot().records == [stored]
+    assert {:ok, %{changed: false}} = Store.reconcile([component], true)
+  end
+
   defp record(token, file_path, function) do
     %{
       "token" => token,

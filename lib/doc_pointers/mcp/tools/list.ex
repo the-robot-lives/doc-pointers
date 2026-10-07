@@ -32,7 +32,8 @@ defmodule DocPointers.MCP.Tools.List do
         %{
           uuid: p.uuid,
           token: p.token,
-          marker: DocPointers.Hieroglyph.marker(p.token),
+          kind: p.kind,
+          marker: DocPointers.Marker.open(p.uuid, p.kind),
           file_path: p.file_path,
           class: p.class,
           function: p.function,
