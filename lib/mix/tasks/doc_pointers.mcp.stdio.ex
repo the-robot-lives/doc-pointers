@@ -16,19 +16,19 @@ defmodule Mix.Tasks.DocPointers.Mcp.Stdio do
   Default tools: `doc-pointer/lookup`, `doc-pointer/list`. Do not write to stdout —
   it is the JSON-RPC stream.
 
-  ## Client registration
-
-      claude mcp add doc-pointers -- mix doc_pointers.mcp.stdio
+  On launch, connection commands for Claude Code and Codex are printed to
+  stderr. They include the current project directory and configured root.
   """
   use Mix.Task
 
-  @requirements ["app.start"]
+  @requirements ["app.config"]
 
   @impl Mix.Task
   def run(args) do
     opts = DocPointers.MCP.Runtime.parse(args)
-    DocPointers.MCP.Runtime.configure!(opts)
+    DocPointers.MCP.Runtime.boot!(opts)
     DocPointers.MCP.Runtime.start_stdio!()
+    DocPointers.MCP.ConnectionHelp.print_stdio!(opts)
     Process.sleep(:infinity)
   end
 end

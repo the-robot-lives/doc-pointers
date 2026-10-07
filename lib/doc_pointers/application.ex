@@ -4,7 +4,8 @@ defmodule DocPointers.Application do
   @impl true
   def start(_type, _args) do
     root =
-      System.get_env("DOC_POINTERS_ROOT") ||
+      Application.get_env(:doc_pointers, :boot_root) ||
+        System.get_env("DOC_POINTERS_ROOT") ||
         Application.get_env(:doc_pointers, :root) ||
         File.cwd!()
 

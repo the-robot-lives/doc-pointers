@@ -166,29 +166,62 @@ defmodule DocPointers.Store do
 
   @ignored_segments [".git", "_build", "deps", "node_modules", ".claude", "cover", "tmp"]
 
-  # Git-driven: walk submodule metadata, not the file tree. A filesystem
-  # sweep of a real monorepo takes minutes (vendored node_modules/_build
-  # trees); `git submodule foreach --recursive` takes seconds and yields
-  # root-relative paths for nested submodules.
+  # Walk Git's index for gitlinks instead of spawning a shell for every
+  # `git submodule foreach` level. The latter takes minutes in large nested
+  # monorepos. Only initialized submodules have a .git entry and a store.
   defp detect_submodules(root) do
-    # The command must be ONE argv element: git only shell-evaluates a
-    # single-argument foreach command, so split args leave $displaypath literal.
-    case System.cmd(
-           "git",
-           ["submodule", "foreach", "--recursive", "--quiet", "echo $displaypath"],
-           cd: root,
-           stderr_to_stdout: true
-         ) do
-      {out, 0} ->
-        out
-        |> String.split("\n")
-        |> Enum.map(&String.trim/1)
-        |> Enum.reject(&(&1 == "" or ignored_dir?(&1)))
-        |> Enum.uniq()
+    case gitlinks(root) do
+      {:ok, links} ->
+        links
+        |> Enum.flat_map(fn link -> collect_gitlink(root, link) end)
         |> Enum.sort_by(&byte_size/1, :desc)
 
-      _ ->
+      :error ->
         fallback_detect_submodules(root)
+    end
+  end
+
+  defp collect_gitlink(root, relative) do
+    if ignored_dir?(relative) do
+      []
+    else
+      path = Path.join(root, relative)
+
+      if File.exists?(Path.join(path, ".git")) do
+        nested =
+          case gitlinks(path) do
+            {:ok, links} -> Enum.flat_map(links, &collect_gitlink(root, Path.join(relative, &1)))
+            :error -> []
+          end
+
+        [relative | nested]
+      else
+        []
+      end
+    end
+  end
+
+  defp gitlinks(path) do
+    case System.cmd("git", ["ls-files", "--stage", "-z"], cd: path, stderr_to_stdout: true) do
+      {out, 0} ->
+        links =
+          out
+          |> :binary.split(<<0>>, [:global])
+          |> Enum.flat_map(fn
+            <<"160000 ", _::binary>> = entry ->
+              case :binary.split(entry, <<9>>) do
+                [_meta, name] -> [name]
+                _ -> []
+              end
+
+            _ ->
+              []
+          end)
+
+        {:ok, links}
+
+      _ ->
+        :error
     end
   end
 
