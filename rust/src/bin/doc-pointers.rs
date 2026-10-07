@@ -1392,20 +1392,38 @@ fn legacy_records(db_path: &Path) -> Result<HashMap<String, Pointer>, String> {
     let entries = value
         .as_object()
         .ok_or_else(|| format!("legacy JSON {} must be an object", db_path.display()))?;
+    let mut name_counts: HashMap<String, usize> = HashMap::new();
+    for (code, data) in entries {
+        let name = data
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+            .unwrap_or(code);
+        *name_counts.entry(name.to_string()).or_default() += 1;
+    }
     let mut pointers = HashMap::new();
     for (code, data) in entries {
         let path = data
             .get("path")
             .and_then(Value::as_str)
             .ok_or_else(|| format!("legacy pointer {code} in {} has no path", db_path.display()))?;
-        let name = data.get("name").and_then(Value::as_str).unwrap_or(code);
+        let name = data
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+            .unwrap_or(code);
+        // Legacy JSON has no UUID field. A name alone is ambiguous when the
+        // same function appears under multiple tokens, so bind those UUIDs to
+        // the stable token. Unique names retain their historical UUIDv5 value.
+        let uuid_name = if name_counts[name] == 1 {
+            uuid5_name(name, "", 0)
+        } else {
+            format!("doc-pointers:legacy-token:{code}")
+        };
         pointers.insert(
             code.clone(),
             Pointer {
-                uuid: Some(Uuid::new_v5(
-                    &DOC_POINTER_NAMESPACE,
-                    uuid5_name(name, "", 0).as_bytes(),
-                )),
+                uuid: Some(Uuid::new_v5(&DOC_POINTER_NAMESPACE, uuid_name.as_bytes())),
                 code: code.clone(),
                 path: path.to_string(),
                 line: data.get("line").and_then(Value::as_u64).unwrap_or(0) as usize,
@@ -1842,6 +1860,33 @@ mod tests {
             pointer.uuid,
             Some(Uuid::new_v5(&DOC_POINTER_NAMESPACE, b"doc-pointers:legacy"))
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_duplicate_names_get_distinct_stable_uuids() {
+        let root = env::temp_dir().join(format!("doc-pointers-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(root.join("docs")).unwrap();
+        let db = root.join(DEFAULT_DB_PATH);
+        fs::write(
+            &db,
+            r#"{"ABCD":{"path":"docs/a.md","name":"shared"},"EFGH":{"path":"docs/b.md","name":"shared"},"IJKL":{"path":"docs/c.md","name":"unique"}}"#,
+        )
+        .unwrap();
+        let first = legacy_records(&db).unwrap();
+        assert_ne!(first["ABCD"].uuid, first["EFGH"].uuid);
+        assert_eq!(
+            first["IJKL"].uuid,
+            Some(Uuid::new_v5(&DOC_POINTER_NAMESPACE, b"doc-pointers:unique"))
+        );
+        fs::write(
+            &db,
+            r#"{"IJKL":{"path":"docs/c.md","name":"unique"},"EFGH":{"path":"docs/b.md","name":"shared"},"ABCD":{"path":"docs/a.md","name":"shared"}}"#,
+        )
+        .unwrap();
+        let second = legacy_records(&db).unwrap();
+        assert_eq!(first["ABCD"].uuid, second["ABCD"].uuid);
+        assert_eq!(first["EFGH"].uuid, second["EFGH"].uuid);
         fs::remove_dir_all(root).unwrap();
     }
 
