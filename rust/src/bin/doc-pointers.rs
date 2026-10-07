@@ -248,8 +248,9 @@ fn scan_command(args: &[String]) -> Result<(), String> {
     } else {
         false
     };
+    let expansion = expansion_index(&root, &db_path, &pointers)?;
     let (changed_links, link_errors) =
-        expand_markdown_links(&root, &pointers, options.write, &options.filter)?;
+        expand_markdown_links(&root, &expansion, options.write, &options.filter)?;
     errors.extend(link_errors);
 
     for error in &errors {
@@ -969,8 +970,9 @@ fn annotate_command(args: &[String]) -> Result<(), String> {
         }
         let records = reconcile_records(&root, &db_path, &fresh, &options.filter)?;
         let db_changed = backend_reconcile(&root, &records, true)?;
+        let expansion = expansion_index(&root, &db_path, &fresh)?;
         let (changed_links, link_errors) =
-            expand_markdown_links(&root, &fresh, true, &options.filter)?;
+            expand_markdown_links(&root, &expansion, true, &options.filter)?;
         for error in &link_errors {
             eprintln!("ERROR: {error}");
         }
@@ -1260,7 +1262,7 @@ fn collect_pointers(
             continue;
         };
         let mut in_fence = false;
-        let mut spans: Vec<(MarkerKind, Uuid, String)> = Vec::new();
+        let mut spans: Vec<(MarkerKind, Uuid, String, usize)> = Vec::new();
         for (index, line) in text.lines().enumerate() {
             if path.extension() == Some(OsStr::new("md")) && line.trim_start().starts_with("```") {
                 in_fence = !in_fence;
@@ -1278,19 +1280,25 @@ fn collect_pointers(
                             index + 1,
                             kind.emoji()
                         ));
-                    } else if spans.last() != Some(&(kind, uuid, code.clone())) {
-                        errors.push(format!("{file_path}:{}: closing marker does not match the innermost opening marker", index + 1));
-                    } else {
-                        spans.pop();
-                        if let Some(pointer) = pointers.get_mut(&code) {
-                            if let Some(location) =
-                                pointer.locations.iter_mut().rev().find(|loc| {
-                                    loc.file_path == file_path && loc.end_line.is_none()
-                                })
-                            {
-                                location.end_line = Some(index + 1);
-                            }
+                    } else if let Some(position) = spans
+                        .iter()
+                        .rposition(|open| open.0 == kind && open.1 == uuid)
+                    {
+                        // Spans can overlap: A-open, B-open, A-close, B-close.
+                        // Keep each opening's location so repeated components
+                        // close the correct occurrence.
+                        let (_, _, code, location_index) = spans.remove(position);
+                        if let Some(location) = pointers
+                            .get_mut(&code)
+                            .and_then(|pointer| pointer.locations.get_mut(location_index))
+                        {
+                            location.end_line = Some(index + 1);
                         }
+                    } else {
+                        errors.push(format!(
+                            "{file_path}:{}: closing marker does not match an opening marker",
+                            index + 1
+                        ));
                     }
                     continue;
                 }
@@ -1312,12 +1320,13 @@ fn collect_pointers(
                     line: index + 1,
                     end_line: None,
                 };
-                if let Some(existing) = pointers.get_mut(&code) {
+                let location_index = if let Some(existing) = pointers.get_mut(&code) {
                     if kind == MarkerKind::Component
                         && existing.uuid == Some(uuid)
                         && existing.kind == Some(kind)
                     {
                         existing.locations.push(location);
+                        Some(existing.locations.len() - 1)
                     } else {
                         errors.push(format!(
                             "duplicate pointer {uuid}: {}:{} and {file_path}:{}",
@@ -1325,6 +1334,7 @@ fn collect_pointers(
                             existing.line,
                             index + 1
                         ));
+                        None
                     }
                 } else {
                     pointers.insert(
@@ -1340,9 +1350,12 @@ fn collect_pointers(
                             locations: vec![location],
                         },
                     );
-                }
+                    Some(0)
+                };
                 if kind.closable() {
-                    spans.push((kind, uuid, code));
+                    if let Some(location_index) = location_index {
+                        spans.push((kind, uuid, code, location_index));
+                    }
                 }
                 continue;
             }
@@ -1368,7 +1381,7 @@ fn collect_pointers(
                 pointers.insert(code, pointer);
             }
         }
-        for (kind, uuid, _) in spans {
+        for (kind, uuid, _, _) in spans {
             errors.push(format!(
                 "{file_path}: unclosed marker 〚{}:{uuid}〛",
                 kind.emoji()
@@ -1580,6 +1593,45 @@ fn walk_scan(
         }
     }
     Ok(())
+}
+
+fn expansion_index(
+    root: &Path,
+    db_path: &Path,
+    scanned: &HashMap<String, Pointer>,
+) -> Result<HashMap<String, Pointer>, String> {
+    Ok(merge_expansion_pointers(
+        scanned,
+        backend_status(root)?,
+        legacy_records(db_path)?,
+    ))
+}
+
+fn merge_expansion_pointers(
+    scanned: &HashMap<String, Pointer>,
+    stored: Vec<Pointer>,
+    legacy: HashMap<String, Pointer>,
+) -> HashMap<String, Pointer> {
+    let mut index: HashMap<String, Pointer> = HashMap::new();
+    let mut by_uuid: HashMap<Uuid, String> = HashMap::new();
+    for pointer in legacy
+        .into_values()
+        .chain(stored)
+        .chain(scanned.values().cloned())
+    {
+        if let Some(previous) = index.remove(&pointer.code) {
+            if let Some(uuid) = previous.uuid {
+                by_uuid.remove(&uuid);
+            }
+        }
+        if let Some(uuid) = pointer.uuid {
+            if let Some(old_code) = by_uuid.insert(uuid, pointer.code.clone()) {
+                index.remove(&old_code);
+            }
+        }
+        index.insert(pointer.code.clone(), pointer);
+    }
+    index
 }
 
 fn expand_markdown_links(
@@ -2304,6 +2356,65 @@ mod tests {
             .all(|location| location.end_line == Some(3)));
         let record = pointer_record(pointer);
         assert_eq!(record["locations"].as_array().unwrap().len(), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn overlapping_component_spans_close_by_uuid() {
+        let root = env::temp_dir().join(format!("doc-pointers-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let a = Uuid::new_v5(&DOC_POINTER_NAMESPACE, b"overlapping-component-a");
+        let b = Uuid::new_v5(&DOC_POINTER_NAMESPACE, b"overlapping-component-b");
+        fs::write(
+            root.join("a.md"),
+            format!("# 〚🧩:{a}〛 A :: first\nA and B\n# 〚🧩:{b}〛 B :: second\nA and B\n# 〚/🧩:{a}〛\nB only\n# 〚/🧩:{b}〛\n"),
+        )
+        .unwrap();
+        let (pointers, errors) =
+            collect_pointers(&root, &root.join(DEFAULT_DB_PATH), &ScanFilter::default()).unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(
+            pointers[&unicode4_encode_uuid(a)].locations[0].end_line,
+            Some(5)
+        );
+        assert_eq!(
+            pointers[&unicode4_encode_uuid(b)].locations[0].end_line,
+            Some(7)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn yaml_only_uuid_deeplink_expands() {
+        let root = env::temp_dir().join(format!("doc-pointers-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(root.join("lib")).unwrap();
+        fs::write(root.join("lib/anchor.rs"), "pub fn anchor() {}\n").unwrap();
+        let uuid = Uuid::new_v5(&DOC_POINTER_NAMESPACE, b"yaml-only-uuid-deeplink");
+        let token = unicode4_encode_uuid(uuid);
+        let record = json!({
+            "uuid": uuid.to_string(), "token": token, "kind": "🔧",
+            "file_path": "lib/anchor.rs", "line": 1,
+            "function": "anchor", "description": "YAML only"
+        });
+        backend_reconcile(&root, &[record], true).unwrap();
+        fs::write(
+            root.join("reference.md"),
+            format!("[anchor](deeplink:〚🔧:{uuid}〛)\n"),
+        )
+        .unwrap();
+        let (scanned, errors) =
+            collect_pointers(&root, &root.join(DEFAULT_DB_PATH), &ScanFilter::default()).unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(scanned.is_empty());
+        let index = expansion_index(&root, &root.join(DEFAULT_DB_PATH), &scanned).unwrap();
+        let (changed, errors) =
+            expand_markdown_links(&root, &index, true, &ScanFilter::default()).unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(changed, vec!["reference.md"]);
+        assert_eq!(
+            fs::read_to_string(root.join("reference.md")).unwrap(),
+            format!("[anchor](lib/anchor.rs:1?pointer={uuid})\n")
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
