@@ -60,7 +60,8 @@ defmodule DocPointers.MCP.Tools.Generate do
       do: :ok,
       else:
         {:error,
-         "kind must be one of " <> Enum.join(DocPointers.Marker.string_kinds(), ", ") <>
+         "kind must be one of " <>
+           Enum.join(DocPointers.Marker.string_kinds(), ", ") <>
            " (legacy scope emoji accepted)"}
   end
 

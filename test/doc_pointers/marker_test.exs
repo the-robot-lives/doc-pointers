@@ -57,7 +57,9 @@ defmodule DocPointers.MarkerTest do
       assert Marker.emoji_for(fine) == "🔌"
     end
 
-    assert Marker.string_kinds() == ~w(file module class struct interface protocol behaviour function logic component diagram)
+    assert Marker.string_kinds() ==
+             ~w(file module class struct interface protocol behaviour function logic component diagram)
+
     assert Marker.default_kind() == "function"
     refute Marker.valid_kind?("widget")
     assert Marker.normalize_kind("widget") == nil
@@ -67,6 +69,7 @@ defmodule DocPointers.MarkerTest do
     assert Marker.open(@uuid, "function") == "〚🔧:#{@uuid}〛"
     assert Marker.open(@uuid) == "〚🔧:#{@uuid}〛"
     assert Marker.open(@uuid, "class") == "〚📦:#{@uuid}〛"
+
     assert Marker.declaration(@uuid, "protocol", "Auth", "does auth") ==
              "〚🔌:#{@uuid}〛 Auth :: does auth"
 

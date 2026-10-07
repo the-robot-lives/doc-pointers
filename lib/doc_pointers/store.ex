@@ -550,7 +550,9 @@ defmodule DocPointers.Store do
 
   defp resolve_and_adjust(state, %Pointer{} = pointer) do
     store_key =
-      if pointer.kind == "component", do: "", else: resolve_store_key(state.submodules, pointer.file_path)
+      if pointer.kind == "component",
+        do: "",
+        else: resolve_store_key(state.submodules, pointer.file_path)
 
     adjusted =
       if store_key != "" and pointer.file_path do

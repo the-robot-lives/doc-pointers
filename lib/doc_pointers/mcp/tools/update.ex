@@ -12,6 +12,7 @@ defmodule DocPointers.MCP.Tools.Update do
     field(:class, :string, description: "New class/module name")
     field(:line, :integer, description: "Updated line number")
     field(:file_path, :string, description: "Updated file path (if the source file moved)")
+
     field(:kind, :string,
       description:
         "Kind string: file, module, class, struct, interface, protocol, behaviour, " <>
@@ -64,7 +65,8 @@ defmodule DocPointers.MCP.Tools.Update do
 
       if args[:kind] && not DocPointers.Marker.valid_kind?(args.kind) do
         {:error,
-         "kind must be one of " <> Enum.join(DocPointers.Marker.string_kinds(), ", ") <>
+         "kind must be one of " <>
+           Enum.join(DocPointers.Marker.string_kinds(), ", ") <>
            " (legacy scope emoji accepted)"}
       else
         updates =
