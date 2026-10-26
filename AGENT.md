@@ -9,7 +9,7 @@ Claude Code loads [CLAUDE.md](./CLAUDE.md). Same policy; this file is the harnes
 1. **Trinity Protocol (REQUIRED)**: substantive responses follow Orientation (assumption table, minds-eye, mermaid plan) → Friction (WEDGE/SHADOW/CRITIC) → Response + meta-review. Full text: monorepo `protocols/the-trinity-protocol.md`.
 2. **No shell in main thread** — delegate lookups/builds/greps to tasker subagents; batch and summarize.
 3. **Worktrees (REQUIRED)**: canonical placement `.claude/worktrees/<name>/`, created from this repo's own `.git` off `develop`; `.claude/worktrees/` is gitignored — see **Worktrees — Canonical Convention** below.
-4. **PRs target `develop`.** Never merge or push `main` (CI/CD-only release path).
+4. **PRs target `develop`.** A merge into `main` triggers CI/CD (release path); promotions land via `stage` → `main` PRs.
 
 ## Identity
 
@@ -23,7 +23,7 @@ Elixir. `mix deps.get` · `mix test` · `mix format`.
 
 - Submodules sit on **`develop`** — keep your checkout on `develop`.
 - All PRs target **`develop`** (feature/bug/task branches fork from `develop`).
-- **`main` is CI/CD-only**: CI/CD automation performs all merges into `main` (release path). Never merge to or push `main` by hand.
+- **`main` is release-triggered**: a merge into `main` triggers CI/CD (image build → `bump-chart` → ArgoCD sync). Promotions land via `stage` → `main` PRs per the monorepo merge matrix.
 
 ## Worktrees — Canonical Convention (REQUIRED)
 
