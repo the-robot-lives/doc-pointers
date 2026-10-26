@@ -1,4 +1,7 @@
 defmodule DocPointers.Application do
+  @moduledoc """
+  〚📦:352a2da5-7321-5a0b-9ff1-bdc47e6a0c39〛 DocPointers.Application :: OTP application entry: boots the store GenServer rooted at DOC_POINTERS_ROOT or cwd.
+  """
   use Application
 
   @impl true

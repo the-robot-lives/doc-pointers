@@ -1,4 +1,7 @@
 defmodule DocPointers.Store do
+  @moduledoc """
+  〚📦:4213b674-a0a6-5f98-8e68-bc0559fdafb9〛 DocPointers.Store :: GenServer persistence: owns .meta/pointers.yaml reads, writes, migration, and scans.
+  """
   use GenServer
 
   alias DocPointers.{Marker, Pointer}

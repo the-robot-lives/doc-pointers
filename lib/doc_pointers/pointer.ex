@@ -1,4 +1,7 @@
 defmodule DocPointers.Pointer do
+  @moduledoc """
+  〚📦:aaa868bc-dd61-5aef-a026-2a693d45d884〛 DocPointers.Pointer :: Pointer struct: identity, kind, locations, and timestamps.
+  """
   alias DocPointers.Marker
 
   @enforce_keys [:uuid, :token, :function, :description]

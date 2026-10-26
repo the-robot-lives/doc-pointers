@@ -1,0 +1,122 @@
+---
+pointers:
+  13c90116-2a8e-585f-839a-3b609ad3e032:
+    created_at: 2026-10-26T23:26:10.760498Z
+    description: 'MCP server contract: read-only lookup and list by default; writes gated behind --write or confirm.'
+    file_path: lib/doc_pointers/mcp.ex
+    function: DocPointers.MCP
+    kind: interface
+    line: 3
+    locations:
+      - file_path: lib/doc_pointers/mcp.ex
+        line: 3
+    token: 𓪕𓃧𓂿𓶲
+    updated_at: 2026-10-26T23:26:10.760498Z
+  1cbad482-3902-5f60-8ead-d2681219c67c:
+    created_at: 2026-10-26T23:26:10.760481Z
+    description: Encodes UUIDv5 binaries as 4-glyph tokens from Egyptian, Meroitic, and Anatolian ranges.
+    file_path: lib/doc_pointers/hieroglyph.ex
+    function: DocPointers.Hieroglyph
+    kind: module
+    line: 3
+    locations:
+      - file_path: lib/doc_pointers/hieroglyph.ex
+        line: 3
+    token: 𓢍𓗍𓄧𓁌
+    updated_at: 2026-10-26T23:26:10.760481Z
+  352a2da5-7321-5a0b-9ff1-bdc47e6a0c39:
+    created_at: 2026-10-26T23:26:10.760523Z
+    description: 'OTP application entry: boots the store GenServer rooted at DOC_POINTERS_ROOT or cwd.'
+    file_path: lib/doc_pointers/application.ex
+    function: DocPointers.Application
+    kind: module
+    line: 3
+    locations:
+      - file_path: lib/doc_pointers/application.ex
+        line: 3
+    token: 𔀿𓇦𔉶𓖩
+    updated_at: 2026-10-26T23:26:10.760523Z
+  37fdf013-3acd-53ac-820e-44b3ee6e6dc0:
+    created_at: 2026-10-26T23:26:10.760516Z
+    description: Public Elixir API for minting pointers programmatically.
+    file_path: lib/doc_pointers.ex
+    function: DocPointers
+    kind: module
+    line: 3
+    locations:
+      - file_path: lib/doc_pointers.ex
+        line: 3
+    token: 𓸎𓕅𓨸𓝐
+    updated_at: 2026-10-26T23:26:10.760516Z
+  4213b674-a0a6-5f98-8e68-bc0559fdafb9:
+    created_at: 2026-10-26T23:26:10.760526Z
+    description: 'GenServer persistence: owns .meta/pointers.yaml reads, writes, migration, and scans.'
+    file_path: lib/doc_pointers/store.ex
+    function: DocPointers.Store
+    kind: module
+    line: 3
+    locations:
+      - file_path: lib/doc_pointers/store.ex
+        line: 3
+    token: 𔁻𓓘𓣵𓖙
+    updated_at: 2026-10-26T23:26:10.760526Z
+  606a4ec3-c506-5bc9-af98-cebdcef8c27d:
+    created_at: 2026-10-26T23:26:10.760503Z
+    description: 'Rust CLI grammar and workflow: uuid5, build, annotate, hook, and legacy JSON migration.'
+    file_path: docs/CLI.md
+    function: CLI Guide
+    kind: file
+    line: 3
+    locations:
+      - file_path: docs/CLI.md
+        line: 3
+    token: 𓬖𓻅𓯀𓁝
+    updated_at: 2026-10-26T23:26:10.760503Z
+  8a9f62c0-f058-5758-98ec-0dd104386da0:
+    created_at: 2026-10-26T23:26:10.760530Z
+    description: 'Marker grammar: parse, render, and normalize typed emoji markers and canonical kinds.'
+    file_path: lib/doc_pointers/marker.ex
+    function: DocPointers.Marker
+    kind: module
+    line: 3
+    locations:
+      - file_path: lib/doc_pointers/marker.ex
+        line: 3
+    token: 𔐙𓜖𓔹𓿀
+    updated_at: 2026-10-26T23:26:10.760530Z
+  aaa868bc-dd61-5aef-a026-2a693d45d884:
+    created_at: 2026-10-26T23:26:10.760519Z
+    description: 'Pointer struct: identity, kind, locations, and timestamps.'
+    file_path: lib/doc_pointers/pointer.ex
+    function: DocPointers.Pointer
+    kind: module
+    line: 3
+    locations:
+      - file_path: lib/doc_pointers/pointer.ex
+        line: 3
+    token: 𓿨𓅻𔇹𔆤
+    updated_at: 2026-10-26T23:26:10.760519Z
+  d1c33f00-f644-59c5-a356-5250e5ce1288:
+    created_at: 2026-10-26T23:26:10.760507Z
+    description: 'Repo entry point: what doc-pointers is, marker grammar, install, and MCP setup.'
+    file_path: README.md
+    function: Doc Pointers Overview
+    kind: file
+    line: 3
+    locations:
+      - file_path: README.md
+        line: 3
+    token: 𓶷𔀦𓤔𓊨
+    updated_at: 2026-10-26T23:26:10.760507Z
+  df2a7df6-14eb-5562-86bb-62cd5a2e9fd6:
+    created_at: 2026-10-26T23:26:10.760534Z
+    description: UUIDv5 derivation in the doc-pointers namespace.
+    file_path: lib/doc_pointers/uuid5.ex
+    function: DocPointers.UUID5
+    kind: module
+    line: 3
+    locations:
+      - file_path: lib/doc_pointers/uuid5.ex
+        line: 3
+    token: 𔖝𓺚𓁆𔕆
+    updated_at: 2026-10-26T23:26:10.760534Z

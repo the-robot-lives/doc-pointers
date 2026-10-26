@@ -1,4 +1,7 @@
 defmodule DocPointers.Hieroglyph do
+  @moduledoc """
+  〚📦:1cbad482-3902-5f60-8ead-d2681219c67c〛 DocPointers.Hieroglyph :: Encodes UUIDv5 binaries as 4-glyph tokens from Egyptian, Meroitic, and Anatolian ranges.
+  """
   @token_ranges [
     {0x10980, 0x1099F},
     {0x13000, 0x1342F},
