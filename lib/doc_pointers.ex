@@ -1,5 +1,7 @@
 defmodule DocPointers do
   @moduledoc """
+  〚📦:37fdf013-3acd-53ac-820e-44b3ee6e6dc0〛 DocPointers :: Public Elixir API for minting pointers programmatically.
+
   Doc-pointer hieroglyphic code generator and manager.
 
   Generates UUIDv5-derived 4-character hieroglyphic tokens for durable,

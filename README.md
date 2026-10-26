@@ -1,5 +1,7 @@
 # doc-pointers
 
+<!-- 〚📁:d1c33f00-f644-59c5-a356-5250e5ce1288〛 Doc Pointers Overview :: Repo entry point: what doc-pointers is, marker grammar, install, and MCP setup. -->
+
 **Repo:** https://github.com/the-robot-lives/doc-pointers
 
 Mint durable, code-stable citations for a source locus with a **UUIDv5** identity. Source markers use `〚🔧:550e8400-e29b-51d4-a716-446655440000〛`; existing 4-glyph hieroglyph tokens remain lookup aliases.

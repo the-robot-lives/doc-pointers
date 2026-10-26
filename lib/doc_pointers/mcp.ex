@@ -1,4 +1,7 @@
 defmodule DocPointers.MCP do
+  @moduledoc """
+  〚🔌:13c90116-2a8e-585f-839a-3b609ad3e032〛 DocPointers.MCP :: MCP server contract: read-only lookup and list by default; writes gated behind --write or confirm.
+  """
   use Noizu.MCP.Server,
     name: "doc_pointers",
     version: "0.1.0",

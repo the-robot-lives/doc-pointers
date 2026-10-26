@@ -1,5 +1,7 @@
 # doc-pointers CLI
 
+<!-- 〚📁:606a4ec3-c506-5bc9-af98-cebdcef8c27d〛 CLI Guide :: Rust CLI grammar and workflow: uuid5, build, annotate, hook, and legacy JSON migration. -->
+
 The Rust CLI scans source markers and Markdown links. The Elixir store owns pointer records in `.meta/pointers.yaml` at the root and in each nested Git submodule. The CLI sends JSON requests to `mix doc_pointers.cli`; it does not write pointer YAML or legacy JSON itself.
 
 ## Build and install

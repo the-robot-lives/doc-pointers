@@ -1,5 +1,7 @@
 defmodule DocPointers.Marker do
   @moduledoc """
+  〚📦:8a9f62c0-f058-5758-98ec-0dd104386da0〛 DocPointers.Marker :: Marker grammar: parse, render, and normalize typed emoji markers and canonical kinds.
+
   Canonical typed markers. New markers embed the pointer's 4-glyph hieroglyph
   token — `〚{emoji}:{token}〛` — derived from the UUIDv5 via the existing
   encode path (tokens are never invented). Full UUIDv5 payloads remain
