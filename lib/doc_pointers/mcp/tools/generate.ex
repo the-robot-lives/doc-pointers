@@ -48,9 +48,73 @@ defmodule DocPointers.MCP.Tools.Generate do
 
   @impl true
   def call(args, ctx) do
-    with :ok <- DocPointers.MCP.Writes.authorize(args, ctx),
-         :ok <- validate_kind(args[:kind]) do
-      do_call(args)
+    with :ok <- DocPointers.MCP.Writes.authorize(args, ctx) do
+      register(%{
+        base_name:
+          args[:name_override] ||
+            DocPointers.UUID5.build_annotation_name(args.file_path, args.function_name),
+        file_path: args.file_path,
+        kind: args[:kind],
+        class: args[:class],
+        function: args.function_name,
+        line: args[:line],
+        description: args.description,
+        salt: args[:salt]
+      })
+    end
+  end
+
+  @doc """
+  Shared registration pipeline: mint a UUIDv5 + hieroglyph token for `base_name`,
+  persist the pointer, and return its metadata map. Used by doc-pointer/generate
+  and doc-pointer/generate-batch.
+
+  Attrs: base_name (required), function (required), file_path, kind, class, line,
+  description, salt.
+  """
+  def register(%{base_name: base_name, function: function} = attrs) do
+    with :ok <- validate_kind(attrs[:kind]) do
+      kind = (attrs[:kind] && DocPointers.Marker.normalize_kind(attrs.kind)) || "function"
+
+      case generate_with_collision_check(base_name, attrs[:salt], 0) do
+        {:ok, uuid_string, token} ->
+          pointer =
+            DocPointers.Pointer.new(%{
+              uuid: uuid_string,
+              token: token,
+              kind: kind,
+              file_path: attrs[:file_path],
+              class: attrs[:class],
+              function: function,
+              line: attrs[:line],
+              description: attrs[:description] || ""
+            })
+
+          DocPointers.Store.put(pointer)
+
+          {:ok,
+           %{
+             uuid: uuid_string,
+             token: token,
+             kind: pointer.kind,
+             marker: DocPointers.Marker.open(uuid_string, pointer.kind),
+             close_marker: maybe_close(uuid_string, pointer.kind),
+             declaration:
+               DocPointers.Marker.declaration(
+                 uuid_string,
+                 pointer.kind,
+                 function,
+                 attrs[:description] || ""
+               ),
+             file_path: attrs[:file_path],
+             function: function,
+             class: attrs[:class],
+             description: attrs[:description] || ""
+           }}
+
+        {:error, :max_attempts} ->
+          {:error, "Failed to generate a unique token after #{@max_attempts} attempts"}
+      end
     end
   end
 
@@ -64,54 +128,6 @@ defmodule DocPointers.MCP.Tools.Generate do
          "kind must be one of " <>
            Enum.join(DocPointers.Marker.string_kinds(), ", ") <>
            " (legacy scope emoji accepted)"}
-  end
-
-  defp do_call(args) do
-    kind = (args[:kind] && DocPointers.Marker.normalize_kind(args.kind)) || "function"
-
-    base_name =
-      args[:name_override] ||
-        DocPointers.UUID5.build_annotation_name(args.file_path, args.function_name)
-
-    case generate_with_collision_check(base_name, args[:salt], 0) do
-      {:ok, uuid_string, token} ->
-        pointer =
-          DocPointers.Pointer.new(%{
-            uuid: uuid_string,
-            token: token,
-            kind: kind,
-            file_path: args.file_path,
-            class: args[:class],
-            function: args.function_name,
-            line: args[:line],
-            description: args.description
-          })
-
-        DocPointers.Store.put(pointer)
-
-        {:ok,
-         %{
-           uuid: uuid_string,
-           token: token,
-           kind: pointer.kind,
-           marker: DocPointers.Marker.open(uuid_string, pointer.kind),
-           close_marker: maybe_close(uuid_string, pointer.kind),
-           declaration:
-             DocPointers.Marker.declaration(
-               uuid_string,
-               pointer.kind,
-               args.function_name,
-               args.description
-             ),
-           file_path: args.file_path,
-           function: args.function_name,
-           class: args[:class],
-           description: args[:description]
-         }}
-
-      {:error, :max_attempts} ->
-        {:error, "Failed to generate a unique token after #{@max_attempts} attempts"}
-    end
   end
 
   defp maybe_close(uuid, kind) do
