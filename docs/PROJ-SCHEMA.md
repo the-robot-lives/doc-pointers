@@ -38,6 +38,8 @@ erDiagram
         STRING class "optional"
         STRING function "required, e.g. login/2"
         INT line "optional"
+        STRING kind "canonical kind string"
+        STRING locations "list of source spans"
         STRING description "required"
         TIMESTAMP created_at "ISO8601 UTC string"
         TIMESTAMP updated_at "ISO8601 UTC string"
@@ -65,6 +67,8 @@ TABLE(pointer) {
   file_path : STRING " optional; submodule prefix stripped"
   class : STRING " optional"
   line : INT " optional"
+  kind : STRING " canonical kind string"
+  locations : ARRAY " list of source spans"
   created_at : TIMESTAMP " ISO8601 UTC string"
   updated_at : TIMESTAMP " ISO8601 UTC string"
 }
@@ -88,6 +92,10 @@ pointers:
     file_path: lib/foo.ex      # optional; relative to owning store
     class: MyApp.Auth          # optional
     line: 42                   # optional integer
+    kind: module               # canonical string kind (emoji normalizes: 📦→module, 🔌→interface)
+    locations:                 # source span(s); 🧩 components may list spans across files
+      - file_path: lib/foo.ex
+        line: 42
     description: Golden vector # required
     created_at: "2026-09-01T12:00:00.000000Z"   # ISO8601 UTC, app-generated
     updated_at: "2026-09-01T12:00:00.000000Z"   # ISO8601 UTC, bumped on update
@@ -98,9 +106,11 @@ pointers:
 | *(map key)* | UUIDv5 (hyphenated string) | No | always | Stable identity; derived from name hash |
 | `token` | String (4 glyphs) | No | always | Unique across loaded stores; collision → attempt suffix (max 10 000) |
 | `function` | String | No | always | Part of UUIDv5 name derivation |
-| `file_path` | String | Yes | if set | Relative to owning store; submodule prefix stripped before write |
+| `file_path` | String | Yes | if set | Relative to owning store; submodule prefix stripped before write; mirrored in `locations` |
 | `class` | String | Yes | if set | Free-form grouping/filter key |
-| `line` | Integer | Yes | if set | Advisory only (lines rot) |
+| `line` | Integer | Yes | if set | Advisory only (lines rot); mirrored in `locations` |
+| `kind` | String (`file` \| `module` \| `class` \| `struct` \| `interface` \| `protocol` \| `behaviour` \| `function` \| `logic` \| `component` \| `diagram`) | Yes | when explicit | Canonical kind; emoji markers normalize to defaults (📦→module, 🔌→interface, 🔧→function); legacy records may omit until re-saved |
+| `locations` | Array of `{file_path, line?, end_line?}` | Yes | when non-empty | Source span(s); single-anchor kinds have one entry, 🧩 components may recur across files |
 | `description` | String | No | always | |
 | `created_at` | ISO8601 UTC string | No (new records) | always | Set once by `Pointer.new/1` |
 | `updated_at` | ISO8601 UTC string | No (new records) | always | Refreshed on `Store.update/2` |
@@ -158,6 +168,7 @@ UUID is re-derived via `UUID5.build_name(data["name"] || token)`).
 |------|---------|--------------------|
 | `--root PATH` (CLI, both mix tasks) | — | Overrides env at task boot via `Store.set_root/1` |
 | `DOC_POINTERS_ROOT` (env) | — | Read at OTP app start |
+| `DOC_POINTERS_HOME` (env) | — | Rust CLI only: checkout hosting the Elixir backend (must contain `mix.exs`) |
 | `config :doc_pointers, root: …` (app env) | — | Used if env var unset |
 | `File.cwd!/0` | — | Final fallback root |
 | `--write` / `-w` (CLI) or `DOC_POINTERS_MCP_WRITES` ∈ {1,true,TRUE,yes,YES} | off | Enables `generate`/`update` tools + listing them; stored as `config :doc_pointers, :mcp_writes` |

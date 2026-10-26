@@ -16,6 +16,8 @@ erDiagram
         STRING file_path "optional; submodule prefix stripped"
         STRING class "optional"
         INT line "optional"
+        STRING kind "canonical kind string"
+        STRING locations "list of source spans"
         TIMESTAMP created_at "ISO8601 UTC string"
         TIMESTAMP updated_at "ISO8601 UTC string"
     }
@@ -30,6 +32,7 @@ erDiagram
 | Config knob | Default | Notes |
 |-------------|---------|-------|
 | `--root` / `DOC_POINTERS_ROOT` / `config :doc_pointers, :root` / cwd | cwd | Target root, in that order |
+| `DOC_POINTERS_HOME` | — | Rust CLI: checkout hosting the Elixir backend |
 | `--write` / `DOC_POINTERS_MCP_WRITES` | off | Enables generate/update MCP tools |
 | `confirm: true` (tool arg) | — | Per-call write approval |
 | `--port` / `DOC_POINTERS_PORT` | 4242 | HTTP transport, 127.0.0.1 only |

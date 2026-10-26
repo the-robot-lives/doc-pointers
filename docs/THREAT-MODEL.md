@@ -46,9 +46,15 @@ graph LR
     Store -.->|"read paths"| Gitmodules
 ```
 
-Write tools (`generate`, `update`) are hidden unless the server is started with
-`--write` / `DOC_POINTERS_MCP_WRITES`, and otherwise require per-call
-`confirm: true` (`mcp/writes.ex`).
+Write tools (`generate`, `update`, `generate-batch`) are hidden unless the server
+is started with `--write` / `DOC_POINTERS_MCP_WRITES`, and otherwise require
+per-call `confirm: true` (`mcp/writes.ex`).
+
+The Rust scanner CLI (`bin/doc-pointers`, `rust/`) is a second ingress: it parses
+repository sources as untrusted input, and execs `mix doc_pointers.cli` from
+`PATH` with `DOC_POINTERS_HOME` as the backend checkout (`Command::new("mix")`,
+`rust/src/bin/doc-pointers.rs`). Its `hook` command wraps a repo's pre-commit
+hook to run `build --check` on every commit.
 
 ## Vulnerability register
 
@@ -61,6 +67,8 @@ Write tools (`generate`, `update`) are hidden unless the server is started with
 | T-005 | Low | DoS | Single named GenServer serializes all calls; collision retry loop bounded at 10 000 attempts; `list` capped at 500/page | Mitigated — bounded loops and pagination |
 | T-006 | Info | Repudiation | No audit log of who/when wrote a pointer (only `created_at`/`updated_at`) | Open — accepted for a single-user local tool; git history of the target repo provides the audit trail |
 | T-007 | Info | Info disclosure | Pointer content (`function`, `description`, `file_path`) can echo source-internal names to any MCP client / local reader | Accepted — data is low-sensitivity; no secrets are read, stored, or required |
+| T-008 | Low | EoP / Supply chain | Rust CLI execs `mix` from `PATH` inside `DOC_POINTERS_HOME`; a poisoned `PATH` or backend checkout executes arbitrary code on every CLI call | Open — accepted: local dev tool; the backend checkout is the same trust level as the repo's own mix deps |
+| T-009 | Low | Tampering | CLI parses untrusted source files for markers/deeplinks; malformed input could drive store writes via `build --write` / `annotate --write` | Mitigated — writes are opt-in (`--write` off by default) and flow through the same validated Store backend as MCP tools |
 
 No SQL, no crypto keys beyond the public fixed UUIDv5 namespace, no
 third-party egress, no container/ingress perimeter in this repo (deployment is
@@ -68,7 +76,7 @@ consumer-side).
 
 ## Mitigation coverage
 
-2 mitigated · 1 partial · 2 open (both accepted) · 2 informational.
+4 mitigated · 1 partial · 3 open (all accepted) · 1 informational.
 
 | Control | Covers | Where |
 |---------|--------|-------|
@@ -76,14 +84,15 @@ consumer-side).
 | HTTP binds `127.0.0.1` only; stdio is the documented preferred transport | T-001 | `lib/doc_pointers/mcp/runtime.ex` |
 | Collision retry cap (10 000) + list pagination cap (500) | T-005 | `lib/doc_pointers.ex`, `mcp/tools/list.ex` |
 | Legacy import gated on empty stores, one-shot, re-encoded to YAML | T-004 | `lib/doc_pointers/store.ex` |
+| CLI store writes opt-in (`--write`); ops routed through the validated JSON backend | T-009 | `rust/src/bin/doc-pointers.rs`, `lib/mix/tasks/doc_pointers.cli.ex` |
 
 ## Residual risk
 
 Unauthenticated loopback HTTP (T-001) is accepted while the endpoint stays
 loopback-only and write-off by default; retire `mcp.server` usage in favor of
-`mcp.stdio` if this becomes untenable. `.gitmodules` path trust (T-003) and
-absence of an audit log (T-006) are accepted as consequences of the local,
-single-user, repo-owner-trusted threat context.
+`mcp.stdio` if this becomes untenable. `.gitmodules` path trust (T-003), the CLI's `mix`-from-`PATH` backend exec
+(T-008), and absence of an audit log (T-006) are accepted as consequences of
+the local, single-user, repo-owner-trusted threat context.
 
 Tree is small — no `docs/threats/*` extracts.
 

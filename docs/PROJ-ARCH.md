@@ -16,8 +16,8 @@ Quick reference: [`PROJ-ARCH.summary.md`](PROJ-ARCH.summary.md).
 Doc-pointers solve “how do I cite a specific function or locus across docs without
 brittle line numbers?” Each pointer pairs a full **UUIDv5** (stable identity, keyed in
 storage) with a short **4-glyph token** drawn from Egyptian, Meroitic, and Anatolian
-Unicode blocks. Tokens appear in prose as markers `⟦TOKEN⟧` or declaration lines
-`⟦TOKEN⟧ Name :: Description`.
+Unicode blocks. Tokens appear in prose as typed markers `〚emoji:UUIDv5〛` (declaration lines append
+`Name :: Description`); legacy `⟦TOKEN⟧` forms remain readable for migration.
 
 Generation is deterministic: name = `doc-pointers:{file}::{function}[:salt][:attempt]`,
 hashed under a fixed custom UUIDv5 namespace. If the derived 4-glyph token collides with
@@ -29,7 +29,14 @@ are stripped of that prefix and written into that submodule’s own `.meta/point
 OTP boots a single `DocPointers.Store` GenServer. `mix doc_pointers.mcp.stdio`
 supervises `DocPointers.MCP` with `transport: :stdio`. Optional
 `mix doc_pointers.mcp.server` binds Bandit to **127.0.0.1:4242**. Default listed
-tools are lookup/list; generate/update require `--write` or `confirm=true`.
+tools are lookup/list; generate/update/generate-batch require `--write` or
+`confirm=true`.
+
+A Rust scanner CLI (`doc-pointers`, `rust/`) reads and writes the same stores:
+it scans source markers and Markdown deeplinks, mints UUIDs (`uuid5`), annotates
+public functions (`annotate`), and reconciles stores through a JSON-lines
+backend (`mix doc_pointers.cli`). `build --check` doubles as a pre-commit/CI
+gate via `doc-pointers hook`. Grammar reference: [`CLI.md`](CLI.md).
 
 ---
 
@@ -40,13 +47,17 @@ tools are lookup/list; generate/update require `--write` or `confirm=true`.
 | Public API | `DocPointers` | `generate/3,4` — UUID5 → hieroglyph, collision-retry, `Store.put` |
 | OTP app | `DocPointers.Application` | Supervises Store; root from `DOC_POINTERS_ROOT` / app env / cwd |
 | UUIDv5 | `DocPointers.UUID5` | Custom namespace, name builders, encode/decode string |
-| Hieroglyph | `DocPointers.Hieroglyph` | 128-bit UUID → 4-glyph token; `marker/1`, `declaration/3` |
+| Hieroglyph | `DocPointers.Hieroglyph` | 128-bit UUID → 4-glyph token; legacy `⟦⟧` `marker/1`, `declaration/3` |
+| Markers | `DocPointers.Marker` | Typed `〚emoji:UUID〛` grammar: parse, render, canonical kinds |
 | Model | `DocPointers.Pointer` | Struct + YAML map codec (`to_map` / `from_map`) |
 | Store | `DocPointers.Store` | GenServer: load/save YAML, token index, submodule split, legacy JSON import |
 | MCP server | `DocPointers.MCP` | `Noizu.MCP.Server` registry (`doc_pointers` v0.1.0) |
 | Tools | `mcp/tools/*` | lookup · list (default); generate · update (`--write` / confirm) |
 | stdio entry | `Mix.Tasks.DocPointers.Mcp.Stdio` | `{DocPointers.MCP, transport: :stdio}` |
 | HTTP entry | `Mix.Tasks.DocPointers.Mcp.Server` | Bandit + Streamable HTTP Plug on `127.0.0.1:/mcp` |
+| Rust CLI | `rust/` · `bin/doc-pointers` | Scanner: markers + deeplinks, `uuid5`, `annotate`, `build --check`, pre-commit hook |
+| CLI backend | `Mix.Tasks.DocPointers.Cli` | JSON-lines store ops (`status`, `reconcile`) for the Rust CLI |
+| Store maintenance | `Mix.Tasks.DocPointers.MigrateStores` | Re-split pointers into owning submodule stores |
 
 ---
 
@@ -156,6 +167,7 @@ On-disk shape: `%{"pointers" => %{uuid => map_without_uuid}}`. In-memory Store a
 | `doc-pointer/list` | no | Paginated list; filter `file_prefix`, `class` (limit ≤ 500) |
 | `doc-pointer/generate` | yes (`--write` or `confirm`) | Mint unique token; return uuid, token, marker, declaration |
 | `doc-pointer/update` | yes (`--write` or `confirm`) | Metadata only (description, class, line, file_path) by uuid or token |
+| `doc-pointer/generate-batch` | yes (`--write` or `confirm`) | Batch registration; locations verified on disk and normalized (#30) |
 
 Generate logic is duplicated in the MCP tool and `DocPointers.generate/4` (same
 collision algorithm); both write through `Store`.
@@ -167,11 +179,12 @@ collision algorithm); both write through `Store`.
 | Layer | Choice |
 |-------|--------|
 | Language / OTP | Elixir `~> 1.18`, Application + one_for_one Supervisor |
-| MCP framework | `noizu_mcp` `~> 0.1.3` (`Noizu.MCP.Server`, Streamable HTTP Plug) |
+| MCP framework | `noizu_mcp` `~> 0.5.0` (`Noizu.MCP.Server`, Streamable HTTP Plug) |
 | HTTP | `bandit` `~> 1.6`, `plug` `~> 1.16` |
 | Persistence | `yaml_elixir` (read), `ymlr` (write), `jason` (legacy JSON) |
 | Crypto | Erlang `:crypto` (SHA-1 for UUIDv5) |
-| Config | `DOC_POINTERS_ROOT`, `DOC_POINTERS_PORT`, `DOC_POINTERS_MCP_WRITES`; Mix flags `--root`, `--port`, `--write` |
+| Scanner CLI | Rust (cargo); JSON-lines to `mix doc_pointers.cli` — see [`CLI.md`](CLI.md) |
+| Config | `DOC_POINTERS_ROOT`, `DOC_POINTERS_PORT`, `DOC_POINTERS_MCP_WRITES`, `DOC_POINTERS_HOME` (Rust CLI backend checkout); Mix flags `--root`, `--port`, `--write` |
 
 **Run MCP:** `mix doc_pointers.mcp.stdio` (preferred)  
 **HTTP:** `mix doc_pointers.mcp.server` → `http://127.0.0.1:4242/mcp`  
@@ -182,9 +195,10 @@ collision algorithm); both write through `Store`.
 ## Boundaries & non-goals
 
 - **In scope:** mint/lookup/list/update pointers; YAML (and one-shot legacy JSON) storage;
-  submodule-aware write routing; MCP + library API.
-- **Out of scope:** scanning source trees for markers, CI enforcement of pointers in code,
-  multi-node Store clustering, auth on the MCP HTTP endpoint (loopback-only; prefer stdio).
+  submodule-aware write routing; MCP + library API; Rust CLI source-tree scanning, deeplink
+  expansion, function annotation, and `build --check` enforcement (pre-commit hook / CI).
+- **Out of scope:** multi-node Store clustering, auth on the MCP HTTP endpoint
+  (loopback-only; prefer stdio).
 - **Not packaged here:** target-project `.meta/` files, `_build/` / `deps/`.
 
 See [`PROJ-LAYOUT.md`](PROJ-LAYOUT.md) for directory tree and setup details.
