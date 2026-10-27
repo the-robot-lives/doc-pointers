@@ -26,7 +26,7 @@ graph LR
         subgraph server [doc_pointers OTP]
             Stdio["stdio transport"]
             HTTP["Bandit 127.0.0.1:4242/mcp<br/>(no auth)"]
-            Tools["MCP tools<br/>lookup · list · generate¹ · update¹"]
+            Tools["MCP tools<br/>lookup · list · generate¹ · update¹ · generate-batch¹"]
             Store["Store GenServer"]
         end
     end

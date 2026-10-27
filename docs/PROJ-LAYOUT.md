@@ -14,8 +14,9 @@ doc-pointers/
 ├── Makefile · bin/doc-pointers   # Rust CLI: cli-build · cli-test · cli-install; source-run wrapper
 ├── rust/                         # Rust scanner CLI → [CLI.md](CLI.md)
 │   ├── Cargo.toml · Cargo.lock
-│   └── src/bin/doc-pointers.rs   #   uuid5 · build · annotate · hook; JSON → mix doc_pointers.cli
+│   └── src/bin/doc-pointers.rs   #   uuid5 · build · annotate · lookup · hook; JSON → mix doc_pointers.cli
 ├── README.md                     # Front door: MCP + library API, storage, config
+├── CHANGELOG.md                  # Dated work log, newest first
 ├── merge-notes.md                # Working notes from branch merges
 ├── CLAUDE.md                     # Agent instructions (Claude Code): stack, worktree rules
 ├── AGENTS.md · AGENT.md          # Mirrored agent instructions (Grok / Codex)
@@ -24,6 +25,7 @@ doc-pointers/
 ├── .tool-versions                # mise/asdf tool pins (Elixir/Erlang)
 ├── .gitignore                    # excludes _build/, deps/, .DS_Store
 ├── .github/workflows/ci.yml      # CI workflow (test, compile, format)
+├── .meta/pointers.yaml           # ★ This repo's own pointer registry (dogfooded), UUID-keyed, tracked
 │
 ├── lib/
 │   ├── doc_pointers.ex           # Public API: DocPointers.generate/3,4
@@ -90,7 +92,7 @@ Tree is small — no `docs/layout/*` extracts.
 | `mcp` + `mcp/tools/*` | MCP surface over Store / generate logic |
 | `mix/tasks/...mcp.stdio` | Preferred local stdio transport |
 | `mix/tasks/...mcp.server` | Loopback Streamable HTTP (Bandit + Plug, 127.0.0.1) |
-| `rust/` · `bin/doc-pointers` · `Makefile` | Rust scanner CLI (uuid5 · build · annotate · hook); `make cli-install` |
+| `rust/` · `bin/doc-pointers` · `Makefile` | Rust scanner CLI (uuid5 · build · annotate · lookup · hook); `make cli-install` |
 | `mix/tasks/...cli` | JSON-lines store backend (status · reconcile) for the Rust CLI |
 | `mix/tasks/...migrate_stores` | Re-split pointers into owning submodule stores |
 
@@ -118,7 +120,8 @@ Tree is small — no `docs/layout/*` extracts.
 ## Generated / excluded
 
 - `_build/`, `deps/` — Mix artifacts (often present locally; not source)
-- Target-project `.meta/` — written at configured root, not packaged here
+- `rust/target/` — Cargo build output; holds the authoritative `rust/target/debug/doc-pointers` binary
+- Target-project `.meta/` — written at configured root, not packaged here (this repo's own `.meta/pointers.yaml` *is* tracked)
 
 ## Conventions
 

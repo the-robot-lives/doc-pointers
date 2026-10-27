@@ -5,10 +5,11 @@ Elixir MCP/library for UUIDv5 → 4-glyph doc-pointer tokens
 
 ```
 doc-pointers/
-├── mix.exs · mix.lock · README.md · merge-notes.md
+├── mix.exs · mix.lock · README.md · CHANGELOG.md · merge-notes.md
 ├── Makefile · bin/ · rust/             # Rust scanner CLI (cargo) + launcher
 ├── CLAUDE.md · AGENTS.md · AGENT.md      # agent instructions (Claude / Grok / Codex)
 ├── .formatter.exs · .tool-versions · .gitignore · .github/
+├── .meta/pointers.yaml                 # this repo's own pointer registry (dogfooded)
 ├── lib/
 │   ├── doc_pointers.ex                 # public generate API
 │   ├── doc_pointers/

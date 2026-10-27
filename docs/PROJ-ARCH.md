@@ -52,10 +52,10 @@ gate via `doc-pointers hook`. Grammar reference: [`CLI.md`](CLI.md).
 | Model | `DocPointers.Pointer` | Struct + YAML map codec (`to_map` / `from_map`) |
 | Store | `DocPointers.Store` | GenServer: load/save YAML, token index, submodule split, legacy JSON import |
 | MCP server | `DocPointers.MCP` | `Noizu.MCP.Server` registry (`doc_pointers` v0.1.0) |
-| Tools | `mcp/tools/*` | lookup · list (default); generate · update (`--write` / confirm) |
+| Tools | `mcp/tools/*` | lookup · list (default); generate · update · generate-batch (`--write` / confirm) |
 | stdio entry | `Mix.Tasks.DocPointers.Mcp.Stdio` | `{DocPointers.MCP, transport: :stdio}` |
 | HTTP entry | `Mix.Tasks.DocPointers.Mcp.Server` | Bandit + Streamable HTTP Plug on `127.0.0.1:/mcp` |
-| Rust CLI | `rust/` · `bin/doc-pointers` | Scanner: markers + deeplinks, `uuid5`, `annotate`, `build --check`, pre-commit hook |
+| Rust CLI | `rust/` · `bin/doc-pointers` | Scanner: markers + deeplinks, `uuid5`, `annotate`, `lookup`, `build --check`, pre-commit hook |
 | CLI backend | `Mix.Tasks.DocPointers.Cli` | JSON-lines store ops (`status`, `reconcile`) for the Rust CLI |
 | Store maintenance | `Mix.Tasks.DocPointers.MigrateStores` | Re-split pointers into owning submodule stores |
 
@@ -148,7 +148,9 @@ flowchart TD
 |-------|--------|
 | `uuid` | Hyphenated UUIDv5 string (YAML map key) |
 | `token` | 4 Unicode codepoints |
-| `file_path`, `class`, `line` | Optional source locus |
+| `kind`, `kind_explicit` | Canonical kind string; whether callers set it explicitly |
+| `locations` | Source span(s): `file_path`, optional `line` / `end_line` |
+| `file_path`, `class`, `line` | Optional source locus (mirrored into `locations`) |
 | `function`, `description` | Required annotation |
 | `created_at`, `updated_at` | ISO-8601 UTC |
 

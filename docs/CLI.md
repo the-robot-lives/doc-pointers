@@ -15,6 +15,8 @@ make cli-install                 # installs to ~/.local/bin by default
 
 `bin/doc-pointers` runs the source crate without installing it. The installed binary needs this checkout for its Elixir backend. Set `DOC_POINTERS_HOME=/absolute/path/to/doc-pointers` if you move the checkout or build the binary elsewhere. Put `mix` on `PATH`.
 
+**Known caveat (current reality):** the installed `~/.local/bin/doc-pointers` copy is unreliable — it can drift from the source crate. The authoritative build is the in-checkout `rust/target/debug/doc-pointers` (produced by `make cli-build`); prefer it, or `bin/doc-pointers` (which `cargo run`s the crate).
+
 ## Markers and references
 
 Canonical markers use a type emoji and a lowercase hyphenated UUIDv5:
@@ -59,7 +61,7 @@ doc-pointers build --root /path/to/project --write
 
 The CLI reconciles declarations into the owning `.meta/pointers.yaml` files and expands `deeplink:` references to current `file:line?pointer=UUID` targets. `build` without `--write` reports the scan without changing files. `build --check` exits nonzero if the stores or links need an update, making it suitable for CI. Old `⟦4-glyph⟧` declarations and deeplinks are still read for migration; new output uses UUID markers.
 
-`--include PATH` and `--exclude PATH` scope scans to root-relative prefixes. Use them for large monorepos. Duplicate UUID declarations are errors except repeated 🧩 spans, which are collected as occurrences.
+`--include PATH` and `--exclude PATH` scope scans to root-relative prefixes. Use them for large monorepos. Duplicate UUID declarations are errors except repeated 🧩 spans, which are collected as occurrences. Excludes are **per-invocation only** — there is no durable exclude list; only `.claude/worktrees` and legacy worktree directories are skipped by default, so generated-bundle directories must be passed each run.
 
 ## Look up a pointer
 
@@ -79,6 +81,8 @@ doc-pointers annotate --root /path/to/project --include lib --write
 ```
 
 `annotate` inserts `〚🔧:UUID〛` markers above unmarked public Rust, Elixir, JavaScript, and TypeScript functions. It is a dry run by default. `--write` inserts markers, reconciles store records, and expands links. Add `--lang exs` to include Elixir scripts. Repeated runs leave marked functions alone. Generated UUIDs use the seed `doc-pointers:<root-relative-path>::<function>`.
+
+**Known gap (current reality):** the scanner has no `.swift` extension, so Swift sources are neither scanned for markers nor annotated. Supported extensions are `asmdef cs css ex exs html js json md meta mjs rs shader ts tsx txt uxml yaml yml`.
 
 ## Pre-commit hook
 
